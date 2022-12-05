@@ -29,7 +29,7 @@ uint = "0.9.1"
 mpl-token-metadata = { version = "1.8.5", features = ["no-entrypoint"] }
 spl-token = { version = "3.5.0", features = ["no-entrypoint"] }
 bytemuck = { version = "1.4.0" }
-arrayref ={ version = "0.3.6"}
+arrayref = { version = "0.3.6"}
 
 [dev-dependencies]
 quickcheck = "0.9"
@@ -41,6 +41,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 overflow-checks = true
+
 [profile.release.build-override]
 opt-level = 3
 incremental = false

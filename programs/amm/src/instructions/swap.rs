@@ -157,7 +157,7 @@ pub fn swap_internal<'b, 'info>(
 
     let updated_reward_infos = pool_state.update_reward_infos(block_timestamp as u64)?;
 
-    let mut state = SwapState {
+    let state = SwapState {
         amount_specified_remaining: amount_specified,
         amount_calculated: 0,
         sqrt_price_x64: pool_state.sqrt_price_x64,
@@ -175,6 +175,116 @@ pub fn swap_internal<'b, 'info>(
 
     // check observation account is owned by the pool
     require_keys_eq!(observation_state.pool_id, pool_state.key());
+
+    let (state, amount_0, amount_1) = swap_on_swap_state(
+        &amm_config,
+        &pool_state,
+        &updated_reward_infos,
+        state,
+        tick_array_states,
+        amount_specified,
+        sqrt_price_limit_x64,
+        zero_for_one,
+        is_base_input,
+    )?;
+
+    // update tick
+    if state.tick != pool_state.tick_current {
+        pool_state.tick_current = state.tick;
+    }
+    // update the previous price to the observation
+    let next_observation_index = observation_state
+        .update_check(
+            block_timestamp,
+            pool_state.sqrt_price_x64,
+            pool_state.observation_index,
+            pool_state.observation_update_duration.into(),
+        )
+        .unwrap();
+    match next_observation_index {
+        Option::Some(index) => pool_state.observation_index = index,
+        Option::None => {}
+    }
+    pool_state.sqrt_price_x64 = state.sqrt_price_x64;
+
+    if liquidity_start != state.liquidity {
+        pool_state.liquidity = state.liquidity;
+    }
+
+    if zero_for_one {
+        pool_state.fee_growth_global_0_x64 = state.fee_growth_global_x64;
+        pool_state.total_fees_token_0 = pool_state
+            .total_fees_token_0
+            .checked_add(state.fee_amount)
+            .unwrap();
+
+        if state.protocol_fee > 0 {
+            pool_state.protocol_fees_token_0 = pool_state
+                .protocol_fees_token_0
+                .checked_add(state.protocol_fee)
+                .unwrap();
+        }
+        if state.fund_fee > 0 {
+            pool_state.fund_fees_token_0 = pool_state
+                .fund_fees_token_0
+                .checked_add(state.fund_fee)
+                .unwrap();
+        }
+        pool_state.swap_in_amount_token_0 = pool_state
+            .swap_in_amount_token_0
+            .checked_add(u128::from(amount_0))
+            .unwrap();
+        pool_state.swap_out_amount_token_1 = pool_state
+            .swap_out_amount_token_1
+            .checked_add(u128::from(amount_1))
+            .unwrap();
+    } else {
+        pool_state.fee_growth_global_1_x64 = state.fee_growth_global_x64;
+        pool_state.total_fees_token_1 = pool_state
+            .total_fees_token_1
+            .checked_add(state.fee_amount)
+            .unwrap();
+
+        if state.protocol_fee > 0 {
+            pool_state.protocol_fees_token_1 = pool_state
+                .protocol_fees_token_1
+                .checked_add(state.protocol_fee)
+                .unwrap();
+        }
+        if state.fund_fee > 0 {
+            pool_state.fund_fees_token_1 = pool_state
+                .fund_fees_token_1
+                .checked_add(state.fund_fee)
+                .unwrap();
+        }
+        pool_state.swap_in_amount_token_1 = pool_state
+            .swap_in_amount_token_1
+            .checked_add(u128::from(amount_1))
+            .unwrap();
+        pool_state.swap_out_amount_token_0 = pool_state
+            .swap_out_amount_token_0
+            .checked_add(u128::from(amount_0))
+            .unwrap();
+    }
+
+    Ok((amount_0, amount_1))
+}
+
+///
+pub fn swap_on_swap_state(
+    amm_config: &AmmConfig,
+    pool_state: &PoolState,
+    updated_reward_infos: &[RewardInfo; REWARD_NUM],
+    mut state: SwapState,
+    tick_array_states: &mut VecDeque<RefMut<TickArrayState>>,
+    amount_specified: u64,
+    sqrt_price_limit_x64: u128,
+    zero_for_one: bool,
+    is_base_input: bool,
+) -> Result<(SwapState, u64, u64)> {
+    let mut tick_array_current = tick_array_states.pop_front().unwrap();
+    // check tick_array account is owned by the pool
+    require_keys_eq!(tick_array_current.pool_id, pool_state.key());
 
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
         pool_state.get_first_initialized_tick_array(zero_for_one)?;
@@ -403,7 +513,7 @@ pub fn swap_internal<'b, 'info>(
                     } else {
                         state.fee_growth_global_x64
                     },
-                    &updated_reward_infos,
+                    updated_reward_infos,
                 );
                 // update tick_state to tick_array account
                 tick_array_current.update_tick_state(
@@ -458,28 +568,6 @@ pub fn swap_internal<'b, 'info>(
             zero_for_one,
         });
     }
-    // update tick
-    if state.tick != pool_state.tick_current {
-        pool_state.tick_current = state.tick;
-    }
-    // update the previous price to the observation
-    let next_observation_index = observation_state
-        .update_check(
-            block_timestamp,
-            pool_state.sqrt_price_x64,
-            pool_state.observation_index,
-            pool_state.observation_update_duration.into(),
-        )
-        .unwrap();
-    match next_observation_index {
-        Option::Some(index) => pool_state.observation_index = index,
-        Option::None => {}
-    }
-    pool_state.sqrt_price_x64 = state.sqrt_price_x64;
-
-    if liquidity_start != state.liquidity {
-        pool_state.liquidity = state.liquidity;
-    }
 
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
         (
@@ -497,63 +585,7 @@ pub fn swap_internal<'b, 'info>(
         )
     };
 
-    if zero_for_one {
-        pool_state.fee_growth_global_0_x64 = state.fee_growth_global_x64;
-        pool_state.total_fees_token_0 = pool_state
-            .total_fees_token_0
-            .checked_add(state.fee_amount)
-            .unwrap();
-
-        if state.protocol_fee > 0 {
-            pool_state.protocol_fees_token_0 = pool_state
-                .protocol_fees_token_0
-                .checked_add(state.protocol_fee)
-                .unwrap();
-        }
-        if state.fund_fee > 0 {
-            pool_state.fund_fees_token_0 = pool_state
-                .fund_fees_token_0
-                .checked_add(state.fund_fee)
-                .unwrap();
-        }
-        pool_state.swap_in_amount_token_0 = pool_state
-            .swap_in_amount_token_0
-            .checked_add(u128::from(amount_0))
-            .unwrap();
-        pool_state.swap_out_amount_token_1 = pool_state
-            .swap_out_amount_token_1
-            .checked_add(u128::from(amount_1))
-            .unwrap();
-    } else {
-        pool_state.fee_growth_global_1_x64 = state.fee_growth_global_x64;
-        pool_state.total_fees_token_1 = pool_state
-            .total_fees_token_1
-            .checked_add(state.fee_amount)
-            .unwrap();
-
-        if state.protocol_fee > 0 {
-            pool_state.protocol_fees_token_1 = pool_state
-                .protocol_fees_token_1
-                .checked_add(state.protocol_fee)
-                .unwrap();
-        }
-        if state.fund_fee > 0 {
-            pool_state.fund_fees_token_1 = pool_state
-                .fund_fees_token_1
-                .checked_add(state.fund_fee)
-                .unwrap();
-        }
-        pool_state.swap_in_amount_token_1 = pool_state
-            .swap_in_amount_token_1
-            .checked_add(u128::from(amount_1))
-            .unwrap();
-        pool_state.swap_out_amount_token_0 = pool_state
-            .swap_out_amount_token_0
-            .checked_add(u128::from(amount_0))
-            .unwrap();
-    }
-
-    Ok((amount_0, amount_1))
+    Ok((state, amount_0, amount_1))
 }
 
 /// Performs a single exact input/output swap
@@ -1576,8 +1608,8 @@ mod swap_test {
             sqrt_price_x64 = pool_state.borrow().sqrt_price_x64;
 
             // reverse swap direction, one_for_zero
-            // Actually, the loop for this swap was executed twice because the previous swap happened to have `pool.tick_current` exactly on the boundary that is divisible by `tick_spacing`. 
-            // In the first iteration of this swap's loop, it found the initial tick (-28860), but at this point, both the initial and final prices were equal to the price at tick -28860. 
+            // Actually, the loop for this swap was executed twice because the previous swap happened to have `pool.tick_current` exactly on the boundary that is divisible by `tick_spacing`.
+            // In the first iteration of this swap's loop, it found the initial tick (-28860), but at this point, both the initial and final prices were equal to the price at tick -28860.
             // This did not meet the conditions for swapping so both swap_amount_input and swap_amount_output were 0. The actual output was calculated in the second iteration of the loop.
             let (amount_0, amount_1) = swap_internal(
                 &amm_config,
