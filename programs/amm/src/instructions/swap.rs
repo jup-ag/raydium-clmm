@@ -270,7 +270,7 @@ pub fn swap_internal<'b, 'info>(
     Ok((amount_0, amount_1))
 }
 
-///
+/// Attempts to extract the quoting logic
 pub fn swap_on_swap_state(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
@@ -282,7 +282,9 @@ pub fn swap_on_swap_state(
     zero_for_one: bool,
     is_base_input: bool,
 ) -> Result<(SwapState, u64, u64)> {
-    let mut tick_array_current = tick_array_states.pop_front().unwrap();
+    let mut tick_array_current = tick_array_states
+        .pop_front()
+        .ok_or(ErrorCode::InsufficientTickArrayStates)?;
     // check tick_array account is owned by the pool
     require_keys_eq!(tick_array_current.pool_id, pool_state.key());
 
@@ -366,14 +368,12 @@ pub fn swap_on_swap_state(
                     pool_state.tick_spacing.into(),
                     zero_for_one,
                 );
-            if next_initialized_tickarray_index.is_none() {
-                return err!(ErrorCode::LiquidityInsufficient);
-            }
-            current_vaild_tick_array_start_index = next_initialized_tickarray_index.unwrap();
+            current_vaild_tick_array_start_index =
+                next_initialized_tickarray_index.ok_or(ErrorCode::LiquidityInsufficient)?;
 
             tick_array_current = tick_array_states
                 .pop_front()
-                .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+                .ok_or(ErrorCode::InsufficientTickArrayStates)?;
 
             require_keys_eq!(tick_array_current.pool_id, pool_state.key());
             require_keys_eq!(
@@ -557,23 +557,23 @@ pub fn swap_on_swap_state(
             state.fund_fee,
             amm_config.fund_fee_rate,
         );
-        emit!(PriceChangeEvent {
-            pool_state: pool_state.key(),
-            tick_before,
-            tick_after: state.tick,
-            sqrt_price_x64_before,
-            sqrt_price_x64_after: state.sqrt_price_x64,
-            liquidity_before,
-            liquidity_after: state.liquidity,
-            zero_for_one,
-        });
+        // emit!(PriceChangeEvent {
+        //     pool_state: pool_state.key(),
+        //     tick_before,
+        //     tick_after: state.tick,
+        //     sqrt_price_x64_before,
+        //     sqrt_price_x64_after: state.sqrt_price_x64,
+        //     liquidity_before,
+        //     liquidity_after: state.liquidity,
+        //     zero_for_one,
+        // });
     }
 
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
         (
             amount_specified
                 .checked_sub(state.amount_specified_remaining)
-                .unwrap(),
+                .ok_or(ErrorCode::InvalidComputation)?,
             state.amount_calculated,
         )
     } else {
@@ -581,7 +581,7 @@ pub fn swap_on_swap_state(
             state.amount_calculated,
             amount_specified
                 .checked_sub(state.amount_specified_remaining)
-                .unwrap(),
+                .ok_or(ErrorCode::InvalidComputation)?,
         )
     };
 

@@ -94,4 +94,9 @@ pub enum ErrorCode {
     NotApproveUpdateRewardEmissiones,
     #[msg("uninitialized reward info")]
     UnInitializedRewardInfo,
+
+    #[msg("Invalid computation")]
+    InvalidComputation,
+    #[msg("")]
+    InsufficientTickArrayStates,
 }
