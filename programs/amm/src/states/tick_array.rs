@@ -17,7 +17,7 @@ pub const TICK_ARRAY_SIZE: i32 = 60;
 pub const MIN_TICK_ARRAY_START_INDEX: i32 = -307200;
 pub const MAX_TICK_ARRAY_START_INDEX: i32 = 306600;
 
-#[account(zero_copy)]
+#[account(zero_copy(unsafe))]
 #[repr(packed)]
 pub struct TickArrayState {
     pub pool_id: Pubkey,
@@ -296,7 +296,7 @@ impl Default for TickArrayState {
     }
 }
 
-#[zero_copy]
+#[zero_copy(unsafe)]
 #[repr(packed)]
 #[derive(Default, Debug)]
 pub struct TickState {
@@ -539,7 +539,7 @@ pub fn check_tick_array_start_index(
     require!(
         tick_array_start_index >= MIN_TICK_ARRAY_START_INDEX
             && tick_array_start_index <= MAX_TICK_ARRAY_START_INDEX,
-            ErrorCode::InvalidTickArrayBoundary
+        ErrorCode::InvalidTickArrayBoundary
     );
     Ok(())
 }

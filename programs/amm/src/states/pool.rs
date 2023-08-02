@@ -52,7 +52,7 @@ pub enum PoolStatusBitFlag {
 ///
 /// PDA of `[POOL_SEED, config, token_mint_0, token_mint_1]`
 ///
-#[account(zero_copy)]
+#[account(zero_copy(unsafe))]
 #[repr(packed)]
 #[derive(Default, Debug)]
 pub struct PoolState {
@@ -510,7 +510,7 @@ pub enum RewardState {
     Ended,
 }
 
-#[zero_copy]
+#[zero_copy(unsafe)]
 #[repr(packed)]
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct RewardInfo {
