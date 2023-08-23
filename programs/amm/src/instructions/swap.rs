@@ -503,11 +503,11 @@ pub fn swap_on_swap_state(
                     updated_reward_infos,
                 );
                 // update tick_state to tick_array account
-                tick_array_current.update_tick_state(
-                    next_initialized_tick.tick,
-                    pool_state.tick_spacing.into(),
-                    *next_initialized_tick,
-                )?;
+                // tick_array_current.update_tick_state(
+                //     next_initialized_tick.tick,
+                //     pool_state.tick_spacing.into(),
+                //     *next_initialized_tick,
+                // )?;
 
                 if zero_for_one {
                     liquidity_net = liquidity_net.neg();
