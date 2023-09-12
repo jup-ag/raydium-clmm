@@ -13,7 +13,7 @@ use std::cell::RefMut;
 use std::collections::VecDeque;
 #[cfg(feature = "enable-log")]
 use std::convert::identity;
-use std::ops::Neg;
+use std::ops::{Deref, Neg};
 
 #[derive(Accounts)]
 pub struct SwapSingle<'info> {
@@ -175,12 +175,17 @@ pub fn swap_internal<'b, 'info>(
 
     // check observation account is owned by the pool
 
+    // To prevent having to change all the outer code, we only care about swap_on_swap_state
+    let tick_array_state_refs: VecDeque<_> = tick_array_states
+        .iter()
+        .map(|ref_mut| ref_mut.deref())
+        .collect();
     let (state, amount_0, amount_1) = swap_on_swap_state(
         &amm_config,
         &pool_state,
         &updated_reward_infos,
         state,
-        tick_array_states,
+        tick_array_state_refs,
         amount_specified,
         sqrt_price_limit_x64,
         zero_for_one,
@@ -275,7 +280,7 @@ pub fn swap_on_swap_state(
     pool_state: &PoolState,
     updated_reward_infos: &[RewardInfo; REWARD_NUM],
     mut state: SwapState,
-    tick_array_states: &mut VecDeque<RefMut<TickArrayState>>,
+    mut tick_array_states: VecDeque<&TickArrayState>,
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
     zero_for_one: bool,
@@ -342,16 +347,17 @@ pub fn swap_on_swap_state(
         let mut step = StepComputations::default();
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
+        let default_tick_state = TickState::default();
         let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
             .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
         {
-            Box::new(*tick_state)
+            tick_state
         } else {
             if !is_match_pool_current_tick_array {
                 is_match_pool_current_tick_array = true;
-                Box::new(*tick_array_current.first_initialized_tick(zero_for_one)?)
+                tick_array_current.first_initialized_tick(zero_for_one)?
             } else {
-                Box::new(TickState::default())
+                &default_tick_state
             }
         };
         #[cfg(feature = "enable-log")]
@@ -376,7 +382,7 @@ pub fn swap_on_swap_state(
                 .ok_or(ErrorCode::InsufficientTickArrayStates)?;
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
-            next_initialized_tick = Box::new(*first_initialized_tick);
+            next_initialized_tick = first_initialized_tick;
         }
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
@@ -489,19 +495,19 @@ pub fn swap_on_swap_state(
                 #[cfg(feature = "enable-log")]
                 msg!("loading next tick {}", step.tick_next);
 
-                let mut liquidity_net = next_initialized_tick.cross(
-                    if zero_for_one {
-                        state.fee_growth_global_x64
-                    } else {
-                        pool_state.fee_growth_global_0_x64
-                    },
-                    if zero_for_one {
-                        pool_state.fee_growth_global_1_x64
-                    } else {
-                        state.fee_growth_global_x64
-                    },
-                    updated_reward_infos,
-                );
+                // let mut liquidity_net = next_initialized_tick.cross(
+                //     if zero_for_one {
+                //         state.fee_growth_global_x64
+                //     } else {
+                //         pool_state.fee_growth_global_0_x64
+                //     },
+                //     if zero_for_one {
+                //         pool_state.fee_growth_global_1_x64
+                //     } else {
+                //         state.fee_growth_global_x64
+                //     },
+                //     updated_reward_infos,
+                // );
                 // update tick_state to tick_array account
                 // tick_array_current.update_tick_state(
                 //     next_initialized_tick.tick,
@@ -509,10 +515,10 @@ pub fn swap_on_swap_state(
                 //     *next_initialized_tick,
                 // )?;
 
-                if zero_for_one {
-                    liquidity_net = liquidity_net.neg();
-                }
-                state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
+                // if zero_for_one {
+                //     liquidity_net = liquidity_net.neg();
+                // }
+                // state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
             }
 
             state.tick = if zero_for_one {
