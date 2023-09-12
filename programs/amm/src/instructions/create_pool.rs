@@ -1,8 +1,8 @@
-use crate::libraries::tick_math;
+use crate::error::ErrorCode;
 use crate::states::*;
+use crate::{libraries::tick_math, util};
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token, TokenAccount};
-
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 #[derive(Accounts)]
 pub struct CreatePool<'info> {
     /// Address paying to create the pool. Can be anyone
@@ -29,12 +29,16 @@ pub struct CreatePool<'info> {
 
     /// Token_0 mint, the key must grater then token_1 mint.
     #[account(
-        constraint = token_mint_0.key() < token_mint_1.key()
+        constraint = token_mint_0.key() < token_mint_1.key(),
+        mint::token_program = token_program_0
     )]
-    pub token_mint_0: Box<Account<'info, Mint>>,
+    pub token_mint_0: Box<InterfaceAccount<'info, Mint>>,
 
     /// Token_1 mint
-    pub token_mint_1: Box<Account<'info, Mint>>,
+    #[account(
+        mint::token_program = token_program_1
+    )]
+    pub token_mint_1: Box<InterfaceAccount<'info, Mint>>,
 
     /// Token_0 vault for the pool
     #[account(
@@ -47,9 +51,10 @@ pub struct CreatePool<'info> {
         bump,
         payer = pool_creator,
         token::mint = token_mint_0,
-        token::authority = pool_state
+        token::authority = pool_state,
+        token::token_program = token_program_0,
     )]
-    pub token_vault_0: Box<Account<'info, TokenAccount>>,
+    pub token_vault_0: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// Token_1 vault for the pool
     #[account(
@@ -62,15 +67,37 @@ pub struct CreatePool<'info> {
         bump,
         payer = pool_creator,
         token::mint = token_mint_1,
-        token::authority = pool_state
+        token::authority = pool_state,
+        token::token_program = token_program_1,
     )]
-    pub token_vault_1: Box<Account<'info, TokenAccount>>,
+    pub token_vault_1: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: Initialize an account to store oracle observations, the account must be created off-chain, constract will initialzied it
     pub observation_state: UncheckedAccount<'info>,
 
-    /// Spl token program
-    pub token_program: Program<'info, Token>,
+    /// Initialize an account to store if a tick array is initialized.
+    #[account(
+        init,
+        seeds = [
+            POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+            pool_state.key().as_ref(),
+        ],
+        bump,
+        payer = pool_creator,
+        space = TickArrayBitmapExtension::LEN
+    )]
+    pub tick_array_bitmap: AccountLoader<'info, TickArrayBitmapExtension>,
+
+    /// Spl token program or token program 2022
+    #[account(
+        address = anchor_spl::token::ID
+    )]
+    pub token_program_0: Interface<'info, TokenInterface>,
+    /// Spl token program or token program 2022
+    #[account(
+        address = anchor_spl::token::ID
+    )]
+    pub token_program_1: Interface<'info, TokenInterface>,
     /// To create a new program account
     pub system_program: Program<'info, System>,
     /// Sysvar for program account
@@ -78,6 +105,12 @@ pub struct CreatePool<'info> {
 }
 
 pub fn create_pool(ctx: Context<CreatePool>, sqrt_price_x64: u128, open_time: u64) -> Result<()> {
+    if !(util::is_supported_mint(&ctx.accounts.token_mint_0).unwrap()
+        && util::is_supported_mint(&ctx.accounts.token_mint_1).unwrap())
+    {
+        return err!(ErrorCode::NotSupportMint);
+    }
+    let pool_id = ctx.accounts.pool_state.key();
     let mut pool_state = ctx.accounts.pool_state.load_init()?;
     let observation_state_loader = initialize_observation_account(
         ctx.accounts.observation_state.to_account_info(),
@@ -106,6 +139,11 @@ pub fn create_pool(ctx: Context<CreatePool>, sqrt_price_x64: u128, open_time: u6
         ctx.accounts.token_mint_1.as_ref(),
         &observation_state_loader,
     )?;
+
+    ctx.accounts
+        .tick_array_bitmap
+        .load_init()?
+        .initialize(pool_id);
 
     emit!(PoolCreatedEvent {
         token_mint_0: ctx.accounts.token_mint_0.key(),
