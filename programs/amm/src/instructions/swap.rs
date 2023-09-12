@@ -198,6 +198,7 @@ pub fn swap_internal<'b, 'info>(
         &updated_reward_infos,
         state,
         tick_array_state_refs,
+        tickarray_bitmap_extension,
         amount_specified,
         sqrt_price_limit_x64,
         zero_for_one,
@@ -293,6 +294,7 @@ pub fn swap_on_swap_state(
     updated_reward_infos: &[RewardInfo; REWARD_NUM],
     mut state: SwapState,
     mut tick_array_states: VecDeque<&TickArrayState>,
+    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
     zero_for_one: bool,
@@ -385,7 +387,7 @@ pub fn swap_on_swap_state(
                     &tickarray_bitmap_extension,
                     current_vaild_tick_array_start_index,
                     zero_for_one,
-                );
+                )?;
             current_vaild_tick_array_start_index =
                 next_initialized_tickarray_index.ok_or(ErrorCode::LiquidityInsufficient)?;
 
