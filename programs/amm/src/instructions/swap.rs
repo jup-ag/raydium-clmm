@@ -538,19 +538,7 @@ pub fn swap_on_swap_state(
                 #[cfg(feature = "enable-log")]
                 msg!("loading next tick {}", step.tick_next);
 
-                // let mut liquidity_net = next_initialized_tick.cross(
-                //     if zero_for_one {
-                //         state.fee_growth_global_x64
-                //     } else {
-                //         pool_state.fee_growth_global_0_x64
-                //     },
-                //     if zero_for_one {
-                //         pool_state.fee_growth_global_1_x64
-                //     } else {
-                //         state.fee_growth_global_x64
-                //     },
-                //     updated_reward_infos,
-                // );
+                let mut liquidity_net = next_initialized_tick.liquidity_net;
                 // update tick_state to tick_array account
                 // tick_array_current.update_tick_state(
                 //     next_initialized_tick.tick,
@@ -558,10 +546,10 @@ pub fn swap_on_swap_state(
                 //     *next_initialized_tick,
                 // )?;
 
-                // if zero_for_one {
-                //     liquidity_net = liquidity_net.neg();
-                // }
-                // state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
+                if zero_for_one {
+                    liquidity_net = liquidity_net.neg();
+                }
+                state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
             }
 
             state.tick = if zero_for_one {
