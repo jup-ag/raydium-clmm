@@ -472,20 +472,20 @@ pub fn swap_on_swap_state(
             state.amount_specified_remaining = state
                 .amount_specified_remaining
                 .checked_sub(step.amount_in + step.fee_amount)
-                .unwrap();
+                .ok_or(ErrorCode::InvalidComputation)?;
             state.amount_calculated = state
                 .amount_calculated
                 .checked_add(step.amount_out)
-                .unwrap();
+                .ok_or(ErrorCode::InvalidComputation)?;
         } else {
             state.amount_specified_remaining = state
                 .amount_specified_remaining
                 .checked_sub(step.amount_out)
-                .unwrap();
+                .ok_or(ErrorCode::InvalidComputation)?;
             state.amount_calculated = state
                 .amount_calculated
                 .checked_add(step.amount_in + step.fee_amount)
-                .unwrap();
+                .ok_or(ErrorCode::InvalidComputation)?;
         }
 
         let step_fee_amount = step.fee_amount;
@@ -493,37 +493,52 @@ pub fn swap_on_swap_state(
         if amm_config.protocol_fee_rate > 0 {
             let delta = U128::from(step_fee_amount)
                 .checked_mul(amm_config.protocol_fee_rate.into())
-                .unwrap()
+                .ok_or(ErrorCode::InvalidComputation)?
                 .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .unwrap()
+                .ok_or(ErrorCode::InvalidComputation)?
                 .as_u64();
-            step.fee_amount = step.fee_amount.checked_sub(delta).unwrap();
-            state.protocol_fee = state.protocol_fee.checked_add(delta).unwrap();
+            step.fee_amount = step
+                .fee_amount
+                .checked_sub(delta)
+                .ok_or(ErrorCode::InvalidComputation)?;
+            state.protocol_fee = state
+                .protocol_fee
+                .checked_add(delta)
+                .ok_or(ErrorCode::InvalidComputation)?;
         }
         // if the fund fee is on, calculate how much is owed, decrement fee_amount, and increment fund_fee
         if amm_config.fund_fee_rate > 0 {
             let delta = U128::from(step_fee_amount)
                 .checked_mul(amm_config.fund_fee_rate.into())
-                .unwrap()
+                .ok_or(ErrorCode::InvalidComputation)?
                 .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .unwrap()
+                .ok_or(ErrorCode::InvalidComputation)?
                 .as_u64();
-            step.fee_amount = step.fee_amount.checked_sub(delta).unwrap();
-            state.fund_fee = state.fund_fee.checked_add(delta).unwrap();
+            step.fee_amount = step
+                .fee_amount
+                .checked_sub(delta)
+                .ok_or(ErrorCode::InvalidComputation)?;
+            state.fund_fee = state
+                .fund_fee
+                .checked_add(delta)
+                .ok_or(ErrorCode::InvalidComputation)?;
         }
 
         // update global fee tracker
         if state.liquidity > 0 {
             let fee_growth_global_x64_delta = U128::from(step.fee_amount)
                 .mul_div_floor(U128::from(fixed_point_64::Q64), U128::from(state.liquidity))
-                .unwrap()
+                .ok_or(ErrorCode::InvalidComputation)?
                 .as_u128();
 
             state.fee_growth_global_x64 = state
                 .fee_growth_global_x64
                 .checked_add(fee_growth_global_x64_delta)
-                .unwrap();
-            state.fee_amount = state.fee_amount.checked_add(step.fee_amount).unwrap();
+                .ok_or(ErrorCode::InvalidComputation)?;
+            state.fee_amount = state
+                .fee_amount
+                .checked_add(step.fee_amount)
+                .ok_or(ErrorCode::InvalidComputation)?;
             #[cfg(feature = "enable-log")]
             msg!(
                 "fee_growth_global_x64_delta:{}, state.fee_growth_global_x64:{}, state.liquidity:{}, step.fee_amount:{}, state.fee_amount:{}",
