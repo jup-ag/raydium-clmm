@@ -99,4 +99,8 @@ pub enum ErrorCode {
     NotSupportMint,
     #[msg("Missing tickarray bitmap extension account")]
     MissingTickArrayBitmapExtensionAccount,
+    #[msg("Invalid computation")]
+    InvalidComputation,
+    #[msg("")]
+    InsufficientTickArrayStates,
 }

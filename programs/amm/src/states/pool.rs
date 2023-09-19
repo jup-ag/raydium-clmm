@@ -491,12 +491,14 @@ impl PoolState {
         if is_initialized {
             return Ok((true, start_index));
         }
-        let next_start_index = self.next_initialized_tick_array_start_index(
+        match self.next_initialized_tick_array_start_index(
             tickarray_bitmap_extension,
             TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
             zero_for_one,
-        )?;
-        return Ok((false, next_start_index.unwrap()));
+        )? {
+            Some(next_start_index) => Ok((false, next_start_index)),
+            None => Err(ErrorCode::LiquidityInsufficient.into()),
+        }
     }
 
     pub fn next_initialized_tick_array_start_index(
@@ -521,12 +523,11 @@ impl PoolState {
             }
             last_tick_array_start_index = start_index;
 
-            if tickarray_bitmap_extension.is_none() {
-                return err!(ErrorCode::MissingTickArrayBitmapExtensionAccount);
-            }
+            let Some(tickarray_bitmap_extension) = tickarray_bitmap_extension else {
+                return Err(ErrorCode::MissingTickArrayBitmapExtensionAccount.into());
+            };
 
             let (is_found, start_index) = tickarray_bitmap_extension
-                .unwrap()
                 .next_initialized_tick_array_from_one_bitmap(
                     last_tick_array_start_index,
                     self.tick_spacing,
@@ -1427,7 +1428,7 @@ pub mod pool_test {
                     &Some(&tick_array_bitmap_extension_info),
                     vec![
                         -tick_spacing * TICK_ARRAY_SIZE * 7394, // The tickarray where min_tick(-443636) is located
-                        tick_spacing * TICK_ARRAY_SIZE * 7393,  // The tickarray where max_tick(443636) is located
+                        tick_spacing * TICK_ARRAY_SIZE * 7393, // The tickarray where max_tick(443636) is located
                     ],
                 );
 
@@ -1449,7 +1450,6 @@ pub mod pool_test {
                     )
                     .unwrap();
                 assert!(start_index.unwrap() == tick_spacing * TICK_ARRAY_SIZE * 7393);
-
             }
         }
     }
