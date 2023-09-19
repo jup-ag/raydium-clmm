@@ -1,14 +1,12 @@
 use crate::error::ErrorCode;
 use crate::libraries::{
-    big_num::{U1024, U128},
-    fixed_point_64,
-    full_math::MulDiv,
-    liquidity_math, swap_math, tick_array_bit_map, tick_math,
+    big_num::U128, fixed_point_64, full_math::MulDiv, liquidity_math, swap_math, tick_math,
 };
 use crate::states::*;
 use crate::util::*;
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Token, TokenAccount};
+use anchor_spl::token::Token;
+use anchor_spl::token_interface::TokenAccount;
 use std::cell::RefMut;
 use std::collections::VecDeque;
 #[cfg(feature = "enable-log")]
@@ -29,20 +27,32 @@ pub struct SwapSingle<'info> {
     pub pool_state: AccountLoader<'info, PoolState>,
 
     /// The user token account for input token
-    #[account(mut)]
-    pub input_token_account: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::token_program = token_program,
+    )]
+    pub input_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The user token account for output token
-    #[account(mut)]
-    pub output_token_account: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::token_program = token_program,
+    )]
+    pub output_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The vault token account for input token
-    #[account(mut)]
-    pub input_vault: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::token_program = token_program,
+    )]
+    pub input_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The vault token account for output token
-    #[account(mut)]
-    pub output_vault: Box<Account<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::token_program = token_program,
+    )]
+    pub output_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The program account for the most recent oracle observation
     #[account(mut, address = pool_state.load()?.observation_key)]
@@ -60,19 +70,20 @@ pub struct SwapAccounts<'b, 'info> {
     pub signer: Signer<'info>,
 
     /// The user token account for input token
-    pub input_token_account: Box<Account<'info, TokenAccount>>,
+    pub input_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The user token account for output token
-    pub output_token_account: Box<Account<'info, TokenAccount>>,
+    pub output_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The vault token account for input token
-    pub input_vault: Box<Account<'info, TokenAccount>>,
+    pub input_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// The vault token account for output token
-    pub output_vault: Box<Account<'info, TokenAccount>>,
+    pub output_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// SPL program for token transfers
     pub token_program: Program<'info, Token>,
+
     /// The factory state to read protocol fees
     pub amm_config: &'b Box<Account<'info, AmmConfig>>,
 
@@ -132,6 +143,7 @@ pub fn swap_internal<'b, 'info>(
     pool_state: &mut RefMut<PoolState>,
     tick_array_states: &mut VecDeque<RefMut<TickArrayState>>,
     observation_state: &mut RefMut<ObservationState>,
+    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
     zero_for_one: bool,
@@ -157,7 +169,7 @@ pub fn swap_internal<'b, 'info>(
 
     let updated_reward_infos = pool_state.update_reward_infos(block_timestamp as u64)?;
 
-    let state = SwapState {
+    let mut state = SwapState {
         amount_specified_remaining: amount_specified,
         amount_calculated: 0,
         sqrt_price_x64: pool_state.sqrt_price_x64,
@@ -174,156 +186,39 @@ pub fn swap_internal<'b, 'info>(
     };
 
     // check observation account is owned by the pool
-
-    // To prevent having to change all the outer code, we only care about swap_on_swap_state
-    let tick_array_state_refs: VecDeque<_> = tick_array_states
-        .iter()
-        .map(|ref_mut| ref_mut.deref())
-        .collect();
-    let (state, amount_0, amount_1) = swap_on_swap_state(
-        &amm_config,
-        &pool_state,
-        &updated_reward_infos,
-        state,
-        tick_array_state_refs,
-        amount_specified,
-        sqrt_price_limit_x64,
-        zero_for_one,
-        is_base_input,
-    )?;
-
-    // update tick
-    if state.tick != pool_state.tick_current {
-        pool_state.tick_current = state.tick;
-    }
-    // update the previous price to the observation
-    let next_observation_index = observation_state
-        .update_check(
-            block_timestamp,
-            pool_state.sqrt_price_x64,
-            pool_state.observation_index,
-            pool_state.observation_update_duration.into(),
-        )
-        .unwrap();
-    match next_observation_index {
-        Option::Some(index) => pool_state.observation_index = index,
-        Option::None => {}
-    }
-    pool_state.sqrt_price_x64 = state.sqrt_price_x64;
-
-    if liquidity_start != state.liquidity {
-        pool_state.liquidity = state.liquidity;
-    }
-
-    if zero_for_one {
-        pool_state.fee_growth_global_0_x64 = state.fee_growth_global_x64;
-        pool_state.total_fees_token_0 = pool_state
-            .total_fees_token_0
-            .checked_add(state.fee_amount)
-            .unwrap();
-
-        if state.protocol_fee > 0 {
-            pool_state.protocol_fees_token_0 = pool_state
-                .protocol_fees_token_0
-                .checked_add(state.protocol_fee)
-                .unwrap();
-        }
-        if state.fund_fee > 0 {
-            pool_state.fund_fees_token_0 = pool_state
-                .fund_fees_token_0
-                .checked_add(state.fund_fee)
-                .unwrap();
-        }
-        pool_state.swap_in_amount_token_0 = pool_state
-            .swap_in_amount_token_0
-            .checked_add(u128::from(amount_0))
-            .unwrap();
-        pool_state.swap_out_amount_token_1 = pool_state
-            .swap_out_amount_token_1
-            .checked_add(u128::from(amount_1))
-            .unwrap();
-    } else {
-        pool_state.fee_growth_global_1_x64 = state.fee_growth_global_x64;
-        pool_state.total_fees_token_1 = pool_state
-            .total_fees_token_1
-            .checked_add(state.fee_amount)
-            .unwrap();
-
-        if state.protocol_fee > 0 {
-            pool_state.protocol_fees_token_1 = pool_state
-                .protocol_fees_token_1
-                .checked_add(state.protocol_fee)
-                .unwrap();
-        }
-        if state.fund_fee > 0 {
-            pool_state.fund_fees_token_1 = pool_state
-                .fund_fees_token_1
-                .checked_add(state.fund_fee)
-                .unwrap();
-        }
-        pool_state.swap_in_amount_token_1 = pool_state
-            .swap_in_amount_token_1
-            .checked_add(u128::from(amount_1))
-            .unwrap();
-        pool_state.swap_out_amount_token_0 = pool_state
-            .swap_out_amount_token_0
-            .checked_add(u128::from(amount_0))
-            .unwrap();
-    }
-
-    Ok((amount_0, amount_1))
-}
-
-/// Attempts to extract the quoting logic
-pub fn swap_on_swap_state(
-    amm_config: &AmmConfig,
-    pool_state: &PoolState,
-    updated_reward_infos: &[RewardInfo; REWARD_NUM],
-    mut state: SwapState,
-    mut tick_array_states: VecDeque<&TickArrayState>,
-    amount_specified: u64,
-    sqrt_price_limit_x64: u128,
-    zero_for_one: bool,
-    is_base_input: bool,
-) -> Result<(SwapState, u64, u64)> {
-    let mut tick_array_current = tick_array_states
-        .pop_front()
-        .ok_or(ErrorCode::InsufficientTickArrayStates)?;
-    // check tick_array account is owned by the pool
-    // require_keys_eq!(tick_array_current.pool_id, pool_state.key());
+    require_keys_eq!(observation_state.pool_id, pool_state.key());
 
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
-        pool_state.get_first_initialized_tick_array(zero_for_one)?;
+        pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
-    // Unecessary validation for quote estimation
-    // let expected_first_tick_array_address = Pubkey::find_program_address(
-    //     &[
-    //         TICK_ARRAY_SEED.as_bytes(),
-    //         pool_state.key().as_ref(),
-    //         &current_vaild_tick_array_start_index.to_be_bytes(),
-    //     ],
-    //     &crate::id(),
-    // )
-    // .0;
+    let expected_first_tick_array_address = Pubkey::find_program_address(
+        &[
+            TICK_ARRAY_SEED.as_bytes(),
+            pool_state.key().as_ref(),
+            &current_vaild_tick_array_start_index.to_be_bytes(),
+        ],
+        &crate::id(),
+    )
+    .0;
 
-    // let mut tick_array_current = tick_array_states.pop_front().unwrap();
-    // for _ in 0..tick_array_states.len() {
-    //     // check tick_array account is owned by the pool
-    //     require_keys_eq!(tick_array_current.pool_id, pool_state.key());
-    //     if tick_array_current.key() == expected_first_tick_array_address {
-    //         break;
-    //     }
-    //     tick_array_current = tick_array_states
-    //         .pop_front()
-    //         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
-    // }
-    // // check first tick array account is correct
-    // require_keys_eq!(
-    //     tick_array_current.key(),
-    //     expected_first_tick_array_address,
-    //     ErrorCode::InvalidFirstTickArrayAccount
-    // );
+    let mut tick_array_current = tick_array_states.pop_front().unwrap();
+    for _ in 0..tick_array_states.len() {
+        // check tick_array account is owned by the pool
+        require_keys_eq!(tick_array_current.pool_id, pool_state.key());
+        if tick_array_current.key() == expected_first_tick_array_address {
+            break;
+        }
+        tick_array_current = tick_array_states
+            .pop_front()
+            .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+    }
+    // check first tick array account is correct
+    require_keys_eq!(
+        tick_array_current.key(),
+        expected_first_tick_array_address,
+        ErrorCode::InvalidFirstTickArrayAccount
+    );
 
     // continue swapping as long as we haven't used the entire input/output and haven't
     // reached the price limit
@@ -340,49 +235,66 @@ pub fn swap_on_swap_state(
             amm_config.protocol_fee_rate
         );
         // Save these three pieces of information for PriceChangeEvent
-        let tick_before = state.tick;
-        let sqrt_price_x64_before = state.sqrt_price_x64;
-        let liquidity_before = state.liquidity;
+        // let tick_before = state.tick;
+        // let sqrt_price_x64_before = state.sqrt_price_x64;
+        // let liquidity_before = state.liquidity;
 
         let mut step = StepComputations::default();
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
-        let default_tick_state = TickState::default();
         let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
             .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
         {
-            tick_state
+            Box::new(*tick_state)
         } else {
             if !is_match_pool_current_tick_array {
                 is_match_pool_current_tick_array = true;
-                tick_array_current.first_initialized_tick(zero_for_one)?
+                Box::new(*tick_array_current.first_initialized_tick(zero_for_one)?)
             } else {
-                &default_tick_state
+                Box::new(TickState::default())
             }
         };
         #[cfg(feature = "enable-log")]
         msg!(
-            "next_initialized_tick, status:{}, tick_index:{}",
+            "next_initialized_tick, status:{}, tick_index:{}, tick_array_current:{}",
             next_initialized_tick.is_initialized(),
-            identity(next_initialized_tick.tick)
+            identity(next_initialized_tick.tick),
+            tick_array_current.key().to_string(),
         );
         if !next_initialized_tick.is_initialized() {
-            let next_initialized_tickarray_index =
-                tick_array_bit_map::next_initialized_tick_array_start_index(
-                    U1024(pool_state.tick_array_bitmap),
+            let next_initialized_tickarray_index = pool_state
+                .next_initialized_tick_array_start_index(
+                    &tickarray_bitmap_extension,
                     current_vaild_tick_array_start_index,
-                    pool_state.tick_spacing.into(),
                     zero_for_one,
-                );
-            current_vaild_tick_array_start_index =
-                next_initialized_tickarray_index.ok_or(ErrorCode::LiquidityInsufficient)?;
+                )?;
+            if next_initialized_tickarray_index.is_none() {
+                return err!(ErrorCode::LiquidityInsufficient);
+            }
 
-            tick_array_current = tick_array_states
-                .pop_front()
-                .ok_or(ErrorCode::InsufficientTickArrayStates)?;
+            let expected_next_tick_array_address = Pubkey::find_program_address(
+                &[
+                    TICK_ARRAY_SEED.as_bytes(),
+                    pool_state.key().as_ref(),
+                    &next_initialized_tickarray_index.unwrap().to_be_bytes(),
+                ],
+                &crate::id(),
+            )
+            .0;
+            while tick_array_current
+                .key()
+                .ne(&expected_next_tick_array_address)
+            {
+                tick_array_current = tick_array_states
+                    .pop_front()
+                    .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+
+                require_keys_eq!(tick_array_current.pool_id, pool_state.key());
+            }
+            current_vaild_tick_array_start_index = next_initialized_tickarray_index.unwrap();
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
-            next_initialized_tick = first_initialized_tick;
+            next_initialized_tick = Box::new(*first_initialized_tick);
         }
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
@@ -411,6 +323,14 @@ pub fn swap_on_swap_state(
             require_gte!(step.sqrt_price_next_x64, step.sqrt_price_start_x64);
             require_gte!(target_price, step.sqrt_price_start_x64);
         }
+        #[cfg(feature = "enable-log")]
+        msg!(
+            "sqrt_price_current_x64:{}, sqrt_price_target:{}, liquidity:{}, amount_remaining:{}",
+            step.sqrt_price_start_x64,
+            target_price,
+            state.liquidity,
+            state.amount_specified_remaining
+        );
         let swap_step = swap_math::compute_swap_step(
             step.sqrt_price_start_x64,
             target_price,
@@ -420,6 +340,8 @@ pub fn swap_on_swap_state(
             is_base_input,
             zero_for_one,
         );
+        #[cfg(feature = "enable-log")]
+        msg!("{:#?}", swap_step);
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
         step.amount_in = swap_step.amount_in;
         step.amount_out = swap_step.amount_out;
@@ -495,30 +417,30 @@ pub fn swap_on_swap_state(
                 #[cfg(feature = "enable-log")]
                 msg!("loading next tick {}", step.tick_next);
 
-                // let mut liquidity_net = next_initialized_tick.cross(
-                //     if zero_for_one {
-                //         state.fee_growth_global_x64
-                //     } else {
-                //         pool_state.fee_growth_global_0_x64
-                //     },
-                //     if zero_for_one {
-                //         pool_state.fee_growth_global_1_x64
-                //     } else {
-                //         state.fee_growth_global_x64
-                //     },
-                //     updated_reward_infos,
-                // );
+                let mut liquidity_net = next_initialized_tick.cross(
+                    if zero_for_one {
+                        state.fee_growth_global_x64
+                    } else {
+                        pool_state.fee_growth_global_0_x64
+                    },
+                    if zero_for_one {
+                        pool_state.fee_growth_global_1_x64
+                    } else {
+                        state.fee_growth_global_x64
+                    },
+                    &updated_reward_infos,
+                );
                 // update tick_state to tick_array account
-                // tick_array_current.update_tick_state(
-                //     next_initialized_tick.tick,
-                //     pool_state.tick_spacing.into(),
-                //     *next_initialized_tick,
-                // )?;
+                tick_array_current.update_tick_state(
+                    next_initialized_tick.tick,
+                    pool_state.tick_spacing.into(),
+                    *next_initialized_tick,
+                )?;
 
-                // if zero_for_one {
-                //     liquidity_net = liquidity_net.neg();
-                // }
-                // state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
+                if zero_for_one {
+                    liquidity_net = liquidity_net.neg();
+                }
+                state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
             }
 
             state.tick = if zero_for_one {
@@ -561,12 +483,34 @@ pub fn swap_on_swap_state(
         //     zero_for_one,
         // });
     }
+    // update tick
+    if state.tick != pool_state.tick_current {
+        pool_state.tick_current = state.tick;
+    }
+    // update the previous price to the observation
+    let next_observation_index = observation_state
+        .update_check(
+            block_timestamp,
+            pool_state.sqrt_price_x64,
+            pool_state.observation_index,
+            pool_state.observation_update_duration.into(),
+        )
+        .unwrap();
+    match next_observation_index {
+        Option::Some(index) => pool_state.observation_index = index,
+        Option::None => {}
+    }
+    pool_state.sqrt_price_x64 = state.sqrt_price_x64;
+
+    if liquidity_start != state.liquidity {
+        pool_state.liquidity = state.liquidity;
+    }
 
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
         (
             amount_specified
                 .checked_sub(state.amount_specified_remaining)
-                .ok_or(ErrorCode::InvalidComputation)?,
+                .unwrap(),
             state.amount_calculated,
         )
     } else {
@@ -574,11 +518,67 @@ pub fn swap_on_swap_state(
             state.amount_calculated,
             amount_specified
                 .checked_sub(state.amount_specified_remaining)
-                .ok_or(ErrorCode::InvalidComputation)?,
+                .unwrap(),
         )
     };
 
-    Ok((state, amount_0, amount_1))
+    if zero_for_one {
+        pool_state.fee_growth_global_0_x64 = state.fee_growth_global_x64;
+        pool_state.total_fees_token_0 = pool_state
+            .total_fees_token_0
+            .checked_add(state.fee_amount)
+            .unwrap();
+
+        if state.protocol_fee > 0 {
+            pool_state.protocol_fees_token_0 = pool_state
+                .protocol_fees_token_0
+                .checked_add(state.protocol_fee)
+                .unwrap();
+        }
+        if state.fund_fee > 0 {
+            pool_state.fund_fees_token_0 = pool_state
+                .fund_fees_token_0
+                .checked_add(state.fund_fee)
+                .unwrap();
+        }
+        pool_state.swap_in_amount_token_0 = pool_state
+            .swap_in_amount_token_0
+            .checked_add(u128::from(amount_0))
+            .unwrap();
+        pool_state.swap_out_amount_token_1 = pool_state
+            .swap_out_amount_token_1
+            .checked_add(u128::from(amount_1))
+            .unwrap();
+    } else {
+        pool_state.fee_growth_global_1_x64 = state.fee_growth_global_x64;
+        pool_state.total_fees_token_1 = pool_state
+            .total_fees_token_1
+            .checked_add(state.fee_amount)
+            .unwrap();
+
+        if state.protocol_fee > 0 {
+            pool_state.protocol_fees_token_1 = pool_state
+                .protocol_fees_token_1
+                .checked_add(state.protocol_fee)
+                .unwrap();
+        }
+        if state.fund_fee > 0 {
+            pool_state.fund_fees_token_1 = pool_state
+                .fund_fees_token_1
+                .checked_add(state.fund_fee)
+                .unwrap();
+        }
+        pool_state.swap_in_amount_token_1 = pool_state
+            .swap_in_amount_token_1
+            .checked_add(u128::from(amount_1))
+            .unwrap();
+        pool_state.swap_out_amount_token_0 = pool_state
+            .swap_out_amount_token_0
+            .checked_add(u128::from(amount_0))
+            .unwrap();
+    }
+
+    Ok((amount_0, amount_1))
 }
 
 /// Performs a single exact input/output swap
@@ -618,10 +618,23 @@ pub fn exact_internal<'b, 'info>(
             ErrorCode::InvalidInputPoolVault
         );
 
+        let mut tickarray_bitmap_extension = None;
         let tick_array_states = &mut VecDeque::new();
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
-        for tick_array_info in remaining_accounts {
-            tick_array_states.push_back(TickArrayState::load_mut(tick_array_info)?);
+
+        for account_info in remaining_accounts.into_iter() {
+            if account_info
+                .key()
+                .eq(&TickArrayBitmapExtension::key(pool_state.key()))
+            {
+                tickarray_bitmap_extension = Some(
+                    *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
+                        .load()?
+                        .deref()),
+                );
+                continue;
+            }
+            tick_array_states.push_back(TickArrayState::load_mut(account_info)?);
         }
 
         (amount_0, amount_1) = swap_internal(
@@ -629,6 +642,7 @@ pub fn exact_internal<'b, 'info>(
             pool_state,
             tick_array_states,
             &mut ctx.observation_state.load_mut()?,
+            &tickarray_bitmap_extension,
             amount_specified,
             if sqrt_price_limit_x64 == 0 {
                 if zero_for_one {
@@ -678,7 +692,9 @@ pub fn exact_internal<'b, 'info>(
             &ctx.signer,
             &token_account_0,
             &vault_0,
+            None,
             &ctx.token_program,
+            None,
             amount_0,
         )?;
         if vault_1.amount <= amount_1 {
@@ -690,7 +706,9 @@ pub fn exact_internal<'b, 'info>(
             &ctx.pool_state,
             &vault_1,
             &token_account_1,
+            None,
             &ctx.token_program,
+            None,
             amount_1,
         )?;
     } else {
@@ -698,7 +716,9 @@ pub fn exact_internal<'b, 'info>(
             &ctx.signer,
             &token_account_1,
             &vault_1,
+            None,
             &ctx.token_program,
+            None,
             amount_1,
         )?;
         if vault_0.amount <= amount_0 {
@@ -709,7 +729,9 @@ pub fn exact_internal<'b, 'info>(
             &ctx.pool_state,
             &vault_0,
             &token_account_0,
+            None,
             &ctx.token_program,
+            None,
             amount_0,
         )?;
     }
@@ -841,7 +863,7 @@ mod swap_test {
             ));
             pool_state
                 .borrow_mut()
-                .flip_tick_array_bit(tick_array_info.start_tick_index)
+                .flip_tick_array_bit(&None, tick_array_info.start_tick_index)
                 .unwrap();
         }
 
@@ -890,6 +912,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 12188240002,
                 3049500711113990606,
                 true,
@@ -920,6 +943,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 121882400020,
                 3049500711113990606,
                 true,
@@ -947,6 +971,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 60941200010,
                 3049500711113990606,
                 true,
@@ -1003,6 +1028,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 477470480,
                 3049500711113990606,
                 true,
@@ -1033,6 +1059,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 4751002622,
                 3049500711113990606,
                 true,
@@ -1060,6 +1087,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 2358130642,
                 3049500711113990606,
                 true,
@@ -1116,6 +1144,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 887470480,
                 5882283448660210779,
                 false,
@@ -1145,6 +1174,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 3087470480,
                 5882283448660210779,
                 false,
@@ -1173,6 +1203,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 200941200010,
                 5882283448660210779,
                 false,
@@ -1229,6 +1260,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 22796232052,
                 5882283448660210779,
                 false,
@@ -1258,6 +1290,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 79023558189,
                 5882283448660210779,
                 false,
@@ -1286,6 +1319,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 4315086194758,
                 5882283448660210779,
                 false,
@@ -1335,6 +1369,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 12188240002,
                 tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
                 true,
@@ -1379,6 +1414,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 12188240002,
                 tick_math::get_sqrt_price_at_tick(-28860).unwrap(),
                 false,
@@ -1423,6 +1459,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 12188240002,
                 tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
                 true,
@@ -1430,7 +1467,10 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             );
             assert!(result.is_err());
-            assert_eq!(result.unwrap_err(), ErrorCode::LiquidityInsufficient.into());
+            assert_eq!(
+                result.unwrap_err(),
+                ErrorCode::MissingTickArrayBitmapExtensionAccount.into()
+            );
         }
     }
 
@@ -1460,6 +1500,7 @@ mod swap_test {
             &mut pool_state.borrow_mut(),
             &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
             &mut observation_state.borrow_mut(),
+            &None,
             25,
             tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
             true,
@@ -1482,6 +1523,7 @@ mod swap_test {
             &mut pool_state.borrow_mut(),
             &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
             &mut observation_state.borrow_mut(),
+            &None,
             3,
             tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
             true,
@@ -1507,6 +1549,7 @@ mod swap_test {
             &mut pool_state.borrow_mut(),
             &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
             &mut observation_state.borrow_mut(),
+            &None,
             50,
             tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
             true,
@@ -1559,6 +1602,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 27,
                 tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
                 true,
@@ -1585,6 +1629,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 1,
                 tick_math::get_sqrt_price_at_tick(-32400).unwrap(),
                 true,
@@ -1609,6 +1654,7 @@ mod swap_test {
                 &mut pool_state.borrow_mut(),
                 &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
                 &mut observation_state.borrow_mut(),
+                &None,
                 10,
                 tick_math::get_sqrt_price_at_tick(-28800).unwrap(),
                 false,

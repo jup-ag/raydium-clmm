@@ -95,8 +95,8 @@ pub enum ErrorCode {
     #[msg("uninitialized reward info")]
     UnInitializedRewardInfo,
 
-    #[msg("Invalid computation")]
-    InvalidComputation,
-    #[msg("")]
-    InsufficientTickArrayStates,
+    #[msg("Not support token_2022 mint extension")]
+    NotSupportMint,
+    #[msg("Missing tickarray bitmap extension account")]
+    MissingTickArrayBitmapExtensionAccount,
 }

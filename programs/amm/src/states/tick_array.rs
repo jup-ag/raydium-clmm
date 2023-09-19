@@ -14,10 +14,9 @@ use std::ops::DerefMut;
 pub const TICK_ARRAY_SEED: &str = "tick_array";
 pub const TICK_ARRAY_SIZE_USIZE: usize = 60;
 pub const TICK_ARRAY_SIZE: i32 = 60;
-pub const MIN_TICK_ARRAY_START_INDEX: i32 = -307200;
-pub const MAX_TICK_ARRAY_START_INDEX: i32 = 306600;
-
-#[account(zero_copy)]
+// pub const MIN_TICK_ARRAY_START_INDEX: i32 = -443636;
+// pub const MAX_TICK_ARRAY_START_INDEX: i32 = 306600;
+#[account(zero_copy(unsafe))]
 #[repr(packed)]
 pub struct TickArrayState {
     pub pool_id: Pubkey,
@@ -79,8 +78,7 @@ impl TickArrayState {
         tick_spacing: u16,
     ) -> Result<AccountLoader<'info, TickArrayState>> {
         require!(
-            tick_array_start_index >= MIN_TICK_ARRAY_START_INDEX
-                && tick_array_start_index <= MAX_TICK_ARRAY_START_INDEX,
+            TickArrayState::check_is_valid_start_index(tick_array_start_index, tick_spacing),
             ErrorCode::InvaildTickIndex
         );
 
@@ -137,11 +135,7 @@ impl TickArrayState {
         tick_spacing: u16,
         pool_key: Pubkey,
     ) -> Result<()> {
-        require!(
-            start_index >= MIN_TICK_ARRAY_START_INDEX && start_index <= MAX_TICK_ARRAY_START_INDEX,
-            ErrorCode::InvaildTickIndex
-        );
-        require_eq!(0, start_index % (TICK_ARRAY_SIZE * (tick_spacing) as i32));
+        TickArrayState::check_is_valid_start_index(start_index, tick_spacing);
         self.start_tick_index = start_index;
         self.pool_id = pool_key;
         Ok(())
@@ -159,12 +153,8 @@ impl TickArrayState {
     pub fn get_tick_state_mut(
         &mut self,
         tick_index: i32,
-        tick_spacing: i32,
+        tick_spacing: u16,
     ) -> Result<&mut TickState> {
-        require!(
-            tick_index >= tick_math::MIN_TICK && tick_index <= tick_math::MAX_TICK,
-            ErrorCode::InvaildTickIndex
-        );
         let offset_in_array = self.get_tick_offset_in_array(tick_index, tick_spacing)?;
         Ok(&mut self.ticks[offset_in_array])
     }
@@ -172,42 +162,34 @@ impl TickArrayState {
     pub fn update_tick_state(
         &mut self,
         tick_index: i32,
-        tick_spacing: i32,
+        tick_spacing: u16,
         tick_state: TickState,
     ) -> Result<()> {
-        require!(
-            tick_index >= tick_math::MIN_TICK && tick_index <= tick_math::MAX_TICK,
-            ErrorCode::InvaildTickIndex
-        );
         let offset_in_array = self.get_tick_offset_in_array(tick_index, tick_spacing)?;
         self.ticks[offset_in_array] = tick_state;
         Ok(())
     }
 
     /// Get tick's offset in current tick array, tick must be include in tick array， otherwise throw an error
-    fn get_tick_offset_in_array(self, tick_index: i32, tick_spacing: i32) -> Result<usize> {
-        require!(
-            tick_index >= tick_math::MIN_TICK && tick_index <= tick_math::MAX_TICK,
-            ErrorCode::InvaildTickIndex
-        );
-        require_eq!(0, tick_index % tick_spacing);
-        let start_tick_index = TickArrayState::get_arrary_start_index(tick_index, tick_spacing);
+    fn get_tick_offset_in_array(self, tick_index: i32, tick_spacing: u16) -> Result<usize> {
+        let start_tick_index = TickArrayState::get_array_start_index(tick_index, tick_spacing);
         require_eq!(
             start_tick_index,
             self.start_tick_index,
             ErrorCode::InvalidTickArray
         );
-        let offset_in_array = ((tick_index - self.start_tick_index) / tick_spacing) as usize;
+        let offset_in_array =
+            ((tick_index - self.start_tick_index) / i32::from(tick_spacing)) as usize;
         Ok(offset_in_array)
     }
 
     /// Base on swap directioin, return the first initialized tick in the tick array.
-    pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<&TickState> {
+    pub fn first_initialized_tick(&mut self, zero_for_one: bool) -> Result<&mut TickState> {
         if zero_for_one {
             let mut i = TICK_ARRAY_SIZE - 1;
             while i >= 0 {
                 if self.ticks[i as usize].is_initialized() {
-                    return Ok(self.ticks.get(i as usize).unwrap());
+                    return Ok(self.ticks.get_mut(i as usize).unwrap());
                 }
                 i = i - 1;
             }
@@ -215,7 +197,7 @@ impl TickArrayState {
             let mut i = 0;
             while i < TICK_ARRAY_SIZE_USIZE {
                 if self.ticks[i].is_initialized() {
-                    return Ok(self.ticks.get(i).unwrap());
+                    return Ok(self.ticks.get_mut(i).unwrap());
                 }
                 i = i + 1;
             }
@@ -227,27 +209,23 @@ impl TickArrayState {
     /// and current_tick_index % tick_spacing maybe not equal zero.
     /// If price move to left tick <= current_tick_index, or to right tick > current_tick_index
     pub fn next_initialized_tick(
-        &self,
+        &mut self,
         current_tick_index: i32,
         tick_spacing: u16,
         zero_for_one: bool,
-    ) -> Result<Option<&TickState>> {
-        require!(
-            current_tick_index >= tick_math::MIN_TICK && current_tick_index <= tick_math::MAX_TICK,
-            ErrorCode::InvaildTickIndex
-        );
+    ) -> Result<Option<&mut TickState>> {
         let current_tick_array_start_index =
-            TickArrayState::get_arrary_start_index(current_tick_index, tick_spacing as i32);
+            TickArrayState::get_array_start_index(current_tick_index, tick_spacing);
         if current_tick_array_start_index != self.start_tick_index {
             return Ok(None);
         }
         let mut offset_in_array =
-            (current_tick_index - self.start_tick_index) / (tick_spacing as i32);
+            (current_tick_index - self.start_tick_index) / i32::from(tick_spacing);
 
         if zero_for_one {
             while offset_in_array >= 0 {
                 if self.ticks[offset_in_array as usize].is_initialized() {
-                    return Ok(self.ticks.get(offset_in_array as usize));
+                    return Ok(self.ticks.get_mut(offset_in_array as usize));
                 }
                 offset_in_array = offset_in_array - 1;
             }
@@ -255,7 +233,7 @@ impl TickArrayState {
             offset_in_array = offset_in_array + 1;
             while offset_in_array < TICK_ARRAY_SIZE {
                 if self.ticks[offset_in_array as usize].is_initialized() {
-                    return Ok(self.ticks.get(offset_in_array as usize));
+                    return Ok(self.ticks.get_mut(offset_in_array as usize));
                 }
                 offset_in_array = offset_in_array + 1;
             }
@@ -265,21 +243,38 @@ impl TickArrayState {
 
     /// Base on swap directioin, return the next tick array start index.
     pub fn next_tick_arrary_start_index(&self, tick_spacing: u16, zero_for_one: bool) -> i32 {
+        let ticks_in_array = TICK_ARRAY_SIZE * i32::from(tick_spacing);
         if zero_for_one {
-            self.start_tick_index - (tick_spacing as i32) * TICK_ARRAY_SIZE
+            self.start_tick_index - ticks_in_array
         } else {
-            self.start_tick_index + (tick_spacing as i32) * TICK_ARRAY_SIZE
+            self.start_tick_index + ticks_in_array
         }
     }
 
     /// Input an arbitrary tick_index, output the start_index of the tick_array it sits on
-    pub fn get_arrary_start_index(tick_index: i32, tick_spacing: i32) -> i32 {
-        assert!(tick_index >= tick_math::MIN_TICK && tick_index <= tick_math::MAX_TICK);
-        let mut start = tick_index / (tick_spacing * TICK_ARRAY_SIZE);
-        if tick_index < 0 && tick_index % (tick_spacing * TICK_ARRAY_SIZE) != 0 {
+    pub fn get_array_start_index(tick_index: i32, tick_spacing: u16) -> i32 {
+        let ticks_in_array = TickArrayState::tick_count(tick_spacing);
+        let mut start = tick_index / ticks_in_array;
+        if tick_index < 0 && tick_index % ticks_in_array != 0 {
             start = start - 1
         }
-        start * (tick_spacing * TICK_ARRAY_SIZE)
+        start * ticks_in_array
+    }
+
+    pub fn check_is_valid_start_index(tick_index: i32, tick_spacing: u16) -> bool {
+        if TickState::check_is_out_of_boundary(tick_index) {
+            if tick_index > tick_math::MAX_TICK {
+                return false;
+            }
+            let min_start_index =
+                TickArrayState::get_array_start_index(tick_math::MIN_TICK, tick_spacing);
+            return tick_index == min_start_index;
+        }
+        tick_index % TickArrayState::tick_count(tick_spacing) == 0
+    }
+
+    pub fn tick_count(tick_spacing: u16) -> i32 {
+        TICK_ARRAY_SIZE * i32::from(tick_spacing)
     }
 }
 
@@ -296,7 +291,7 @@ impl Default for TickArrayState {
     }
 }
 
-#[zero_copy]
+#[zero_copy(unsafe)]
 #[repr(packed)]
 #[derive(Default, Debug)]
 pub struct TickState {
@@ -315,18 +310,19 @@ pub struct TickState {
     pub reward_growths_outside_x64: [u128; REWARD_NUM],
     // Unused bytes for future upgrades.
     pub padding: [u32; 13],
-    // pub cross_up_liquidity_delta: u128,
-    // pub cross_down_liquidity_delta: u128,
-    // pub range_order_cross_up_time: u64,
-    // pub range_order_cross_down_time: u64,
-    // pub padding: u32,
 }
 
 impl TickState {
     pub const LEN: usize = 4 + 16 + 16 + 16 + 16 + 16 * REWARD_NUM + 16 + 16 + 8 + 8 + 4;
 
     pub fn initialize(&mut self, tick: i32, tick_spacing: u16) -> Result<()> {
-        check_tick_boundary(tick, tick_spacing)?;
+        if TickState::check_is_out_of_boundary(tick) {
+            return err!(ErrorCode::InvaildTickIndex);
+        }
+        require!(
+            tick % i32::from(tick_spacing) == 0,
+            ErrorCode::TickAndSpacingNotMatch
+        );
         self.tick = tick;
         Ok(())
     }
@@ -409,6 +405,12 @@ impl TickState {
     pub fn is_initialized(self) -> bool {
         self.liquidity_gross != 0
     }
+
+    /// Common checks for a valid tick input.
+    /// A tick is valid if it lies within tick boundaries
+    pub fn check_is_out_of_boundary(tick: i32) -> bool {
+        tick < tick_math::MIN_TICK || tick > tick_math::MAX_TICK
+    }
 }
 
 // Calculates the fee growths inside of tick_lower and tick_upper based on their positions relative to tick_current.
@@ -470,7 +472,7 @@ pub fn get_reward_growths_inside(
     tick_upper: &TickState,
     tick_current_index: i32,
     reward_infos: &[RewardInfo; REWARD_NUM],
-) -> ([u128; REWARD_NUM]) {
+) -> [u128; REWARD_NUM] {
     let mut reward_growths_inside = [0; REWARD_NUM];
 
     for i in 0..REWARD_NUM {
@@ -513,34 +515,21 @@ pub fn get_reward_growths_inside(
     reward_growths_inside
 }
 
-/// Common checks for a valid tick input.
-/// A tick is valid iff it lies within tick boundaries and it is a multiple
-/// of tick spacing.
-///
-pub fn check_tick_boundary(tick: i32, tick_spacing: u16) -> Result<()> {
-    require!(tick >= tick_math::MIN_TICK, ErrorCode::TickLowerOverflow);
-    require!(tick <= tick_math::MAX_TICK, ErrorCode::TickUpperOverflow);
-    require!(
-        tick % tick_spacing as i32 == 0,
-        ErrorCode::TickAndSpacingNotMatch
-    );
-    Ok(())
-}
-
 pub fn check_tick_array_start_index(
     tick_array_start_index: i32,
     tick_index: i32,
     tick_spacing: u16,
 ) -> Result<()> {
-    check_tick_boundary(tick_index, tick_spacing)?;
-    let expect_start_index =
-        TickArrayState::get_arrary_start_index(tick_index, tick_spacing as i32);
-    require_eq!(tick_array_start_index, expect_start_index);
     require!(
-        tick_array_start_index >= MIN_TICK_ARRAY_START_INDEX
-            && tick_array_start_index <= MAX_TICK_ARRAY_START_INDEX,
-        ErrorCode::InvalidTickArrayBoundary
+        tick_index >= tick_math::MIN_TICK,
+        ErrorCode::TickLowerOverflow
     );
+    require!(
+        tick_index <= tick_math::MAX_TICK,
+        ErrorCode::TickUpperOverflow
+    );
+    let expect_start_index = TickArrayState::get_array_start_index(tick_index, tick_spacing);
+    require_eq!(tick_array_start_index, expect_start_index);
     Ok(())
 }
 
@@ -598,7 +587,7 @@ pub mod tick_array_test {
         for tick_state in tick_states {
             assert!(tick_state.tick != 0);
             let offset = new_tick_array
-                .get_tick_offset_in_array(tick_state.tick, tick_spacing as i32)
+                .get_tick_offset_in_array(tick_state.tick, tick_spacing)
                 .unwrap();
             new_tick_array.ticks[offset] = tick_state;
         }
@@ -633,14 +622,24 @@ pub mod tick_array_test {
 
         #[test]
         fn get_arrary_start_index_test() {
-            assert_eq!(TickArrayState::get_arrary_start_index(120, 3), 0);
-            assert_eq!(TickArrayState::get_arrary_start_index(1002, 30), 0);
-            assert_eq!(TickArrayState::get_arrary_start_index(-120, 3), -180);
-            assert_eq!(TickArrayState::get_arrary_start_index(-1002, 30), -1800);
-            assert_eq!(TickArrayState::get_arrary_start_index(-20, 10), -600);
-            assert_eq!(TickArrayState::get_arrary_start_index(20, 10), 0);
-            assert_eq!(TickArrayState::get_arrary_start_index(-1002, 10), -1200);
-            assert_eq!(TickArrayState::get_arrary_start_index(-600, 10), -600);
+            assert_eq!(TickArrayState::get_array_start_index(120, 3), 0);
+            assert_eq!(TickArrayState::get_array_start_index(1002, 30), 0);
+            assert_eq!(TickArrayState::get_array_start_index(-120, 3), -180);
+            assert_eq!(TickArrayState::get_array_start_index(-1002, 30), -1800);
+            assert_eq!(TickArrayState::get_array_start_index(-20, 10), -600);
+            assert_eq!(TickArrayState::get_array_start_index(20, 10), 0);
+            assert_eq!(TickArrayState::get_array_start_index(-1002, 10), -1200);
+            assert_eq!(TickArrayState::get_array_start_index(-600, 10), -600);
+            assert_eq!(TickArrayState::get_array_start_index(-30720, 1), -30720);
+            assert_eq!(TickArrayState::get_array_start_index(30720, 1), 30720);
+            assert_eq!(
+                TickArrayState::get_array_start_index(tick_math::MIN_TICK, 1),
+                -443640
+            );
+            assert_eq!(
+                TickArrayState::get_array_start_index(tick_math::MAX_TICK, 1),
+                443580
+            );
         }
 
         #[test]
@@ -673,7 +672,7 @@ pub mod tick_array_test {
             assert_eq!(
                 tick_array_ref
                     .borrow()
-                    .get_tick_offset_in_array(808, tick_spacing as i32)
+                    .get_tick_offset_in_array(808, tick_spacing)
                     .unwrap_err(),
                 error!(ErrorCode::InvalidTickArray)
             );
@@ -681,7 +680,7 @@ pub mod tick_array_test {
             assert_eq!(
                 tick_array_ref
                     .borrow()
-                    .get_tick_offset_in_array(960, tick_spacing as i32)
+                    .get_tick_offset_in_array(960, tick_spacing)
                     .unwrap(),
                 0
             );
@@ -689,7 +688,7 @@ pub mod tick_array_test {
             assert_eq!(
                 tick_array_ref
                     .borrow()
-                    .get_tick_offset_in_array(1105, tick_spacing as i32)
+                    .get_tick_offset_in_array(1105, tick_spacing)
                     .unwrap_err(),
                 error!(anchor_lang::error::ErrorCode::RequireEqViolated)
             );
@@ -697,7 +696,7 @@ pub mod tick_array_test {
             assert_eq!(
                 tick_array_ref
                     .borrow()
-                    .get_tick_offset_in_array(1108, tick_spacing as i32)
+                    .get_tick_offset_in_array(1108, tick_spacing)
                     .unwrap(),
                 37
             );
@@ -705,7 +704,7 @@ pub mod tick_array_test {
             assert_eq!(
                 tick_array_ref
                     .borrow()
-                    .get_tick_offset_in_array(1196, tick_spacing as i32)
+                    .get_tick_offset_in_array(1196, tick_spacing)
                     .unwrap(),
                 59
             );
