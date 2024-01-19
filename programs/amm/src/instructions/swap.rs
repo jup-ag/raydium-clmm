@@ -460,7 +460,8 @@ pub fn swap_on_swap_state(
             amm_config.trade_fee_rate,
             is_base_input,
             zero_for_one,
-        );
+        )
+        .ok_or(ErrorCode::InvalidComputation)?;
         #[cfg(feature = "enable-log")]
         msg!("{:#?}", swap_step);
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
