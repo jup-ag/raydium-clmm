@@ -168,7 +168,7 @@ pub fn get_delta_amount_0_unsigned(
     mut sqrt_ratio_b_x64: u128,
     liquidity: u128,
     round_up: bool,
-) -> u64 {
+) -> Option<u64> {
     // sqrt_ratio_a_x64 should hold the smaller value
     if sqrt_ratio_a_x64 > sqrt_ratio_b_x64 {
         std::mem::swap(&mut sqrt_ratio_a_x64, &mut sqrt_ratio_b_x64);
@@ -179,21 +179,17 @@ pub fn get_delta_amount_0_unsigned(
 
     assert!(sqrt_ratio_a_x64 > 0);
 
-    if round_up {
+    let amount = if round_up {
         U256::div_rounding_up(
-            numerator_1
-                .mul_div_ceil(numerator_2, U256::from(sqrt_ratio_b_x64))
-                .unwrap(),
+            numerator_1.mul_div_ceil(numerator_2, U256::from(sqrt_ratio_b_x64))?,
             U256::from(sqrt_ratio_a_x64),
         )
-        .as_u64()
     } else {
-        (numerator_1
-            .mul_div_floor(numerator_2, U256::from(sqrt_ratio_b_x64))
-            .unwrap()
-            / U256::from(sqrt_ratio_a_x64))
-        .as_u64()
-    }
+        numerator_1.mul_div_floor(numerator_2, U256::from(sqrt_ratio_b_x64))?
+            / U256::from(sqrt_ratio_a_x64)
+    };
+
+    amount.try_into().ok()
 }
 
 /// Gets the delta amount_1 for given liquidity and price range
@@ -203,25 +199,24 @@ pub fn get_delta_amount_1_unsigned(
     mut sqrt_ratio_b_x64: u128,
     liquidity: u128,
     round_up: bool,
-) -> u64 {
+) -> Option<u64> {
     // sqrt_ratio_a_x64 should hold the smaller value
     if sqrt_ratio_a_x64 > sqrt_ratio_b_x64 {
         std::mem::swap(&mut sqrt_ratio_a_x64, &mut sqrt_ratio_b_x64);
     };
 
-    if round_up {
+    let amount = if round_up {
         U256::from(liquidity).mul_div_ceil(
             U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64),
             U256::from(fixed_point_64::Q64),
-        )
+        )?
     } else {
         U256::from(liquidity).mul_div_floor(
             U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64),
             U256::from(fixed_point_64::Q64),
-        )
-    }
-    .unwrap()
-    .as_u64()
+        )?
+    };
+    amount.try_into().ok()
 }
 
 /// Helper function to get signed delta amount_0 for given liquidity and price range
@@ -231,20 +226,26 @@ pub fn get_delta_amount_0_signed(
     liquidity: i128,
 ) -> i64 {
     if liquidity < 0 {
-        -(i64::try_from(get_delta_amount_0_unsigned(
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            u128::try_from(-liquidity).unwrap(),
-            false,
-        ))
-        .unwrap())
+        -i64::try_from(
+            get_delta_amount_0_unsigned(
+                sqrt_ratio_a_x64,
+                sqrt_ratio_b_x64,
+                u128::try_from(-liquidity).unwrap(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     } else {
-        i64::try_from(get_delta_amount_0_unsigned(
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            u128::try_from(liquidity).unwrap(),
-            true,
-        ))
+        i64::try_from(
+            get_delta_amount_0_unsigned(
+                sqrt_ratio_a_x64,
+                sqrt_ratio_b_x64,
+                u128::try_from(liquidity).unwrap(),
+                true,
+            )
+            .unwrap(),
+        )
         .unwrap()
     }
 }
@@ -256,20 +257,26 @@ pub fn get_delta_amount_1_signed(
     liquidity: i128,
 ) -> i64 {
     if liquidity < 0 {
-        -(i64::try_from(get_delta_amount_1_unsigned(
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            u128::try_from(-liquidity).unwrap(),
-            false,
-        ))
-        .unwrap())
+        -i64::try_from(
+            get_delta_amount_1_unsigned(
+                sqrt_ratio_a_x64,
+                sqrt_ratio_b_x64,
+                u128::try_from(-liquidity).unwrap(),
+                false,
+            )
+            .unwrap(),
+        )
+        .unwrap()
     } else {
-        i64::try_from(get_delta_amount_1_unsigned(
-            sqrt_ratio_a_x64,
-            sqrt_ratio_b_x64,
-            u128::try_from(liquidity).unwrap(),
-            true,
-        ))
+        i64::try_from(
+            get_delta_amount_1_unsigned(
+                sqrt_ratio_a_x64,
+                sqrt_ratio_b_x64,
+                u128::try_from(liquidity).unwrap(),
+                true,
+            )
+            .unwrap(),
+        )
         .unwrap()
     }
 }

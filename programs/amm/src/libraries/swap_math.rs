@@ -22,13 +22,13 @@ pub fn compute_swap_step(
     fee_rate: u32,
     is_base_input: bool,
     zero_for_one: bool,
-) -> SwapStep {
+) -> Option<SwapStep> {
     // let exact_in = amount_remaining >= 0;
     let mut swap_step = SwapStep::default();
     if is_base_input {
         // round up amount_in
         // In exact input case, amount_remaining is positive
-        let amount_remaining_less_fee = (amount_remaining as u64)
+        let amount_remaining_less_fee = amount_remaining
             .mul_div_floor(
                 (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
                 u64::from(FEE_RATE_DENOMINATOR_VALUE),
@@ -40,14 +40,14 @@ pub fn compute_swap_step(
                 sqrt_price_current_x64,
                 liquidity,
                 true,
-            )
+            )?
         } else {
             liquidity_math::get_delta_amount_1_unsigned(
                 sqrt_price_current_x64,
                 sqrt_price_target_x64,
                 liquidity,
                 true,
-            )
+            )?
         };
         swap_step.sqrt_price_next_x64 = if amount_remaining_less_fee >= swap_step.amount_in {
             sqrt_price_target_x64
@@ -67,14 +67,14 @@ pub fn compute_swap_step(
                 sqrt_price_current_x64,
                 liquidity,
                 false,
-            )
+            )?
         } else {
             liquidity_math::get_delta_amount_0_unsigned(
                 sqrt_price_current_x64,
                 sqrt_price_target_x64,
                 liquidity,
                 false,
-            )
+            )?
         };
         // In exact output case, amount_remaining is negative
         swap_step.sqrt_price_next_x64 = if amount_remaining >= swap_step.amount_out {
@@ -100,7 +100,7 @@ pub fn compute_swap_step(
                 sqrt_price_current_x64,
                 liquidity,
                 true,
-            )
+            )?
         };
         // if max is reached for exact output case, entire amount_out is needed
         if !(max && !is_base_input) {
@@ -109,7 +109,7 @@ pub fn compute_swap_step(
                 sqrt_price_current_x64,
                 liquidity,
                 false,
-            );
+            )?;
         };
     } else {
         if !(max && is_base_input) {
@@ -118,7 +118,7 @@ pub fn compute_swap_step(
                 swap_step.sqrt_price_next_x64,
                 liquidity,
                 true,
-            )
+            )?
         };
         if !(max && !is_base_input) {
             swap_step.amount_out = liquidity_math::get_delta_amount_0_unsigned(
@@ -126,7 +126,7 @@ pub fn compute_swap_step(
                 swap_step.sqrt_price_next_x64,
                 liquidity,
                 false,
-            )
+            )?
         };
     }
 
@@ -153,7 +153,7 @@ pub fn compute_swap_step(
                 .unwrap()
         };
 
-    swap_step
+    Some(swap_step)
 }
 
 #[cfg(test)]
