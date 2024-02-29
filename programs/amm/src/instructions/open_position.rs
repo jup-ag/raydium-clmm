@@ -184,11 +184,10 @@ pub struct OpenPosition<'info> {
     pub token_program: Program<'info, Token>,
     /// Program to create an ATA for receiving position NFT
     pub associated_token_program: Program<'info, AssociatedToken>,
-
-    /// Program to create NFT metadata
-    /// CHECK: Metadata program address constraint applied
-    #[account(address = mpl_token_metadata::ID)]
-    pub metadata_program: UncheckedAccount<'info>,
+    // Program to create NFT metadata
+    // CHECK: Metadata program address constraint applied
+    // #[account(address = mpl_token_metadata::ID)]
+    // pub metadata_program: UncheckedAccount<'info>,
     // remaining account
     // #[account(
     //     seeds = [
@@ -329,8 +328,8 @@ pub struct OpenPositionV2<'info> {
 
     /// Program to create NFT metadata
     /// CHECK: Metadata program address constraint applied
-    #[account(address = mpl_token_metadata::ID)]
-    pub metadata_program: UncheckedAccount<'info>,
+    // #[account(address = mpl_token_metadata::ID)]
+    // pub metadata_program: UncheckedAccount<'info>,
 
     /// Program to create mint account and mint tokens
     pub token_program_2022: Program<'info, Token2022>,
