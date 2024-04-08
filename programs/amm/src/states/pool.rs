@@ -523,9 +523,8 @@ impl PoolState {
             }
             last_tick_array_start_index = start_index;
 
-            let Some(tickarray_bitmap_extension) = tickarray_bitmap_extension else {
-                return Err(ErrorCode::MissingTickArrayBitmapExtensionAccount.into());
-            };
+            let tickarray_bitmap_extension = tickarray_bitmap_extension
+                .ok_or(ErrorCode::MissingTickArrayBitmapExtensionAccount)?;
 
             let (is_found, start_index) = tickarray_bitmap_extension
                 .next_initialized_tick_array_from_one_bitmap(

@@ -195,7 +195,6 @@ pub fn swap_internal<'b, 'info>(
     let (state, amount_0, amount_1) = swap_on_swap_state(
         &amm_config,
         &pool_state,
-        &updated_reward_infos,
         state,
         tick_array_state_refs,
         tickarray_bitmap_extension,
@@ -291,7 +290,6 @@ pub fn swap_internal<'b, 'info>(
 pub fn swap_on_swap_state(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
-    updated_reward_infos: &[RewardInfo; REWARD_NUM],
     mut state: SwapState,
     mut tick_array_states: VecDeque<&TickArrayState>,
     tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
