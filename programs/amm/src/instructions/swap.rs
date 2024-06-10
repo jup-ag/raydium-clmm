@@ -388,31 +388,15 @@ pub fn swap_on_swap_state(
                     current_vaild_tick_array_start_index,
                     zero_for_one,
                 )?;
+
             current_vaild_tick_array_start_index =
                 next_initialized_tickarray_index.ok_or(ErrorCode::LiquidityInsufficient)?;
 
-            tick_array_current = tick_array_states
-                .pop_front()
-                .ok_or(ErrorCode::InsufficientTickArrayStates)?;
-
-            // let expected_next_tick_array_address = Pubkey::find_program_address(
-            //     &[
-            //         TICK_ARRAY_SEED.as_bytes(),
-            //         pool_state.key().as_ref(),
-            //         &next_initialized_tickarray_index.unwrap().to_be_bytes(),
-            //     ],
-            //     &crate::id(),
-            // )
-            // .0;
-
-            // while tick_array_current
-            //     .key()
-            //     .ne(&expected_next_tick_array_address)
-            // {
-            //     tick_array_current = tick_array_states
-            //         .pop_front()
-            //         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
-            // }
+            while tick_array_current.start_tick_index != current_vaild_tick_array_start_index {
+                tick_array_current = tick_array_states
+                    .pop_front()
+                    .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+            }
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
             next_initialized_tick = first_initialized_tick;
