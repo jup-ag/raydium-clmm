@@ -630,9 +630,9 @@ pub fn swap_on_swap_state(
 
 /// Performs a single exact input/output swap
 /// if is_base_input = true, return vaule is the max_amount_out, otherwise is min_amount_in
-pub fn exact_internal<'b, 'info>(
+pub fn exact_internal<'b, 'c: 'info, 'info>(
     ctx: &mut SwapAccounts<'b, 'info>,
-    remaining_accounts: &[AccountInfo<'info>],
+    remaining_accounts: &'c [AccountInfo<'info>],
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
     is_base_input: bool,
@@ -669,11 +669,9 @@ pub fn exact_internal<'b, 'info>(
         let tick_array_states = &mut VecDeque::new();
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
 
+        let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
         for account_info in remaining_accounts.into_iter() {
-            if account_info
-                .key()
-                .eq(&TickArrayBitmapExtension::key(pool_state.key()))
-            {
+            if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(
                     *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
                         .load()?
@@ -681,7 +679,7 @@ pub fn exact_internal<'b, 'info>(
                 );
                 continue;
             }
-            tick_array_states.push_back(TickArrayState::load_mut(account_info)?);
+            tick_array_states.push_back(AccountLoad::load_data_mut(account_info)?);
         }
 
         (amount_0, amount_1) = swap_internal(
@@ -792,7 +790,9 @@ pub fn exact_internal<'b, 'info>(
         token_account_0: token_account_0.key(),
         token_account_1: token_account_1.key(),
         amount_0,
+        transfer_fee_0: 0,
         amount_1,
+        transfer_fee_1: 0,
         zero_for_one,
         sqrt_price_x64: pool_state.sqrt_price_x64,
         liquidity: pool_state.liquidity,
@@ -817,7 +817,7 @@ pub fn exact_internal<'b, 'info>(
     }
 }
 
-pub fn swap<'a, 'b, 'c, 'info>(
+pub fn swap<'a, 'b, 'c: 'info, 'info>(
     ctx: Context<'a, 'b, 'c, 'info, SwapSingle<'info>>,
     amount: u64,
     other_amount_threshold: u64,
@@ -910,7 +910,7 @@ mod swap_test {
             ));
             pool_state
                 .borrow_mut()
-                .flip_tick_array_bit(&None, tick_array_info.start_tick_index)
+                .flip_tick_array_bit(None, tick_array_info.start_tick_index)
                 .unwrap();
         }
 

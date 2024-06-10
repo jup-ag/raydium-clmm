@@ -5,9 +5,21 @@ pub mod states;
 pub mod util;
 
 use anchor_lang::prelude::*;
+use core as core_;
 use instructions::*;
 use states::*;
 use util::access_control::*;
+
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "raydium-clmm",
+    project_url: "https://raydium.io",
+    contacts: "link:https://immunefi.com/bounty/raydium",
+    policy: "https://immunefi.com/bounty/raydium",
+    source_code: "https://github.com/raydium-io/raydium-clmm",
+    preferred_languages: "en",
+    auditors: "https://github.com/raydium-io/raydium-docs/blob/master/audit/OtterSec%20Q3%202022/Raydium%20concentrated%20liquidity%20(CLMM)%20program.pdf"
+}
 
 #[cfg(feature = "devnet")]
 declare_id!("devi51mZmdwUJGU9hjN27vEz64Gps7uUefqxg27EAtH");
@@ -199,7 +211,7 @@ pub mod amm_v3 {
     /// * `open_time` - reward open timestamp, must be set when state a new cycle
     /// * `end_time` - reward end timestamp
     ///
-    pub fn set_reward_params<'a, 'b, 'c, 'info>(
+    pub fn set_reward_params<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SetRewardParams<'info>>,
         reward_index: u8,
         emissions_per_second_x64: u128,
@@ -260,7 +272,7 @@ pub mod amm_v3 {
     /// * `amount_0_max` - The max amount of token_0 to spend, which serves as a slippage check
     /// * `amount_1_max` - The max amount of token_1 to spend, which serves as a slippage check
     ///
-    pub fn open_position<'a, 'b, 'c, 'info>(
+    pub fn open_position<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, OpenPosition<'info>>,
         tick_lower_index: i32,
         tick_upper_index: i32,
@@ -320,12 +332,12 @@ pub mod amm_v3 {
     /// * `tick_upper_index` - The upper boundary of market
     /// * `tick_array_lower_start_index` - The start index of tick array which include tick low
     /// * `tick_array_upper_start_index` - The start index of tick array which include tick upper
-    /// * `liquidity` - The liquidity to be added, if zero, calculate liquidity base amount_0_max or amount_1_max according base_flag
+    /// * `liquidity` - The liquidity to be added, if zero, and the base_flage is specified, calculate liquidity base amount_0_max or amount_1_max according base_flag, otherwise open position with zero liquidity
     /// * `amount_0_max` - The max amount of token_0 to spend, which serves as a slippage check
     /// * `amount_1_max` - The max amount of token_1 to spend, which serves as a slippage check
-    /// * `base_flag` - must be special if liquidity is zero, false: calculate liquidity base amount_0_max otherwise base amount_1_max
+    /// * `base_flag` - if the liquidity specified as zero, true: calculate liquidity base amount_0_max otherwise base amount_1_max
     ///
-    pub fn open_position_v2<'a, 'b, 'c, 'info>(
+    pub fn open_position_v2<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, OpenPositionV2<'info>>,
         tick_lower_index: i32,
         tick_upper_index: i32,
@@ -404,38 +416,14 @@ pub mod amm_v3 {
     /// * `amount_1_max` - The max amount of token_1 to spend, which serves as a slippage check
     ///
     #[access_control(is_authorized_for_token(&ctx.accounts.nft_owner, &ctx.accounts.nft_account))]
-    pub fn increase_liquidity<'a, 'b, 'c, 'info>(
+    pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidity<'info>>,
         liquidity: u128,
         amount_0_max: u64,
         amount_1_max: u64,
     ) -> Result<()> {
         assert!(liquidity != 0);
-        let increase_liquidity_param = &mut IncreaseLiquidityParam {
-            nft_owner: &ctx.accounts.nft_owner,
-            nft_account: &mut ctx.accounts.nft_account,
-            pool_state: &mut ctx.accounts.pool_state,
-            protocol_position: &mut ctx.accounts.protocol_position,
-            personal_position: &mut ctx.accounts.personal_position,
-            tick_array_lower: &mut ctx.accounts.tick_array_lower,
-            tick_array_upper: &mut ctx.accounts.tick_array_upper,
-            token_account_0: &mut ctx.accounts.token_account_0,
-            token_account_1: &mut ctx.accounts.token_account_1,
-            token_vault_0: &mut ctx.accounts.token_vault_0,
-            token_vault_1: &mut ctx.accounts.token_vault_1,
-            token_program: ctx.accounts.token_program.clone(),
-            token_program_2022: None,
-            vault_0_mint: None,
-            vault_1_mint: None,
-        };
-        instructions::increase_liquidity(
-            increase_liquidity_param,
-            ctx.remaining_accounts,
-            liquidity,
-            amount_0_max,
-            amount_1_max,
-            None,
-        )
+        instructions::increase_liquidity_v1(ctx, liquidity, amount_0_max, amount_1_max, None)
     }
 
     /// Increases liquidity with a exist position, with amount paid by `payer`, support Token2022
@@ -446,10 +434,10 @@ pub mod amm_v3 {
     /// * `liquidity` - The desired liquidity to be added, if zero, calculate liquidity base amount_0 or amount_1 according base_flag
     /// * `amount_0_max` - The max amount of token_0 to spend, which serves as a slippage check
     /// * `amount_1_max` - The max amount of token_1 to spend, which serves as a slippage check
-    /// * `base_flag` - active if liquidity is zero, 0: calculate liquidity base amount_0_max otherwise base amount_1_max
+    /// * `base_flag` - must be specified if liquidity is zero, true: calculate liquidity base amount_0_max otherwise base amount_1_max
     ///
     #[access_control(is_authorized_for_token(&ctx.accounts.nft_owner, &ctx.accounts.nft_account))]
-    pub fn increase_liquidity_v2<'a, 'b, 'c, 'info>(
+    pub fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, IncreaseLiquidityV2<'info>>,
         liquidity: u128,
         amount_0_max: u64,
@@ -459,31 +447,7 @@ pub mod amm_v3 {
         if liquidity == 0 {
             assert!(base_flag.is_some());
         }
-        let increase_liquidity_param = &mut IncreaseLiquidityParam {
-            nft_owner: &ctx.accounts.nft_owner,
-            nft_account: &mut ctx.accounts.nft_account,
-            pool_state: &mut ctx.accounts.pool_state,
-            protocol_position: &mut ctx.accounts.protocol_position,
-            personal_position: &mut ctx.accounts.personal_position,
-            tick_array_lower: &mut ctx.accounts.tick_array_lower,
-            tick_array_upper: &mut ctx.accounts.tick_array_upper,
-            token_account_0: &mut ctx.accounts.token_account_0,
-            token_account_1: &mut ctx.accounts.token_account_1,
-            token_vault_0: &mut ctx.accounts.token_vault_0,
-            token_vault_1: &mut ctx.accounts.token_vault_1,
-            token_program: ctx.accounts.token_program.clone(),
-            token_program_2022: Some(ctx.accounts.token_program_2022.clone()),
-            vault_0_mint: Some(ctx.accounts.vault_0_mint.clone()),
-            vault_1_mint: Some(ctx.accounts.vault_1_mint.clone()),
-        };
-        instructions::increase_liquidity(
-            increase_liquidity_param,
-            ctx.remaining_accounts,
-            liquidity,
-            amount_0_max,
-            amount_1_max,
-            base_flag,
-        )
+        instructions::increase_liquidity_v2(ctx, liquidity, amount_0_max, amount_1_max, base_flag)
     }
 
     /// Decreases liquidity with a exist position
@@ -496,38 +460,13 @@ pub mod amm_v3 {
     /// * `amount_1_min` - The minimum amount of token_1 that should be accounted for the burned liquidity
     ///
     #[access_control(is_authorized_for_token(&ctx.accounts.nft_owner, &ctx.accounts.nft_account))]
-    pub fn decrease_liquidity<'a, 'b, 'c, 'info>(
+    pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
         liquidity: u128,
         amount_0_min: u64,
         amount_1_min: u64,
     ) -> Result<()> {
-        let decrease_liquidity_param = &mut DecreaseLiquidityParam {
-            nft_owner: &ctx.accounts.nft_owner,
-            nft_account: &ctx.accounts.nft_account,
-            personal_position: &mut ctx.accounts.personal_position,
-            pool_state: &mut ctx.accounts.pool_state,
-            protocol_position: &mut ctx.accounts.protocol_position,
-            token_vault_0: &mut ctx.accounts.token_vault_0,
-            token_vault_1: &mut ctx.accounts.token_vault_1,
-            tick_array_lower: &mut ctx.accounts.tick_array_lower,
-            tick_array_upper: &mut ctx.accounts.tick_array_upper,
-            recipient_token_account_0: &mut ctx.accounts.recipient_token_account_0,
-            recipient_token_account_1: &mut ctx.accounts.recipient_token_account_1,
-            token_program: ctx.accounts.token_program.clone(),
-            token_program_2022: None,
-            memo_program: None,
-            vault_0_mint: None,
-            vault_1_mint: None,
-        };
-
-        instructions::decrease_liquidity(
-            decrease_liquidity_param,
-            ctx.remaining_accounts,
-            liquidity,
-            amount_0_min,
-            amount_1_min,
-        )
+        instructions::decrease_liquidity_v1(ctx, liquidity, amount_0_min, amount_1_min)
     }
 
     /// Decreases liquidity with a exist position, support Token2022
@@ -540,38 +479,13 @@ pub mod amm_v3 {
     /// * `amount_1_min` - The minimum amount of token_1 that should be accounted for the burned liquidity
     ///
     #[access_control(is_authorized_for_token(&ctx.accounts.nft_owner, &ctx.accounts.nft_account))]
-    pub fn decrease_liquidity_v2<'a, 'b, 'c, 'info>(
+    pub fn decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidityV2<'info>>,
         liquidity: u128,
         amount_0_min: u64,
         amount_1_min: u64,
     ) -> Result<()> {
-        let decrease_liquidity_param = &mut DecreaseLiquidityParam {
-            nft_owner: &ctx.accounts.nft_owner,
-            nft_account: &ctx.accounts.nft_account,
-            personal_position: &mut ctx.accounts.personal_position,
-            pool_state: &mut ctx.accounts.pool_state,
-            protocol_position: &mut ctx.accounts.protocol_position,
-            token_vault_0: &mut ctx.accounts.token_vault_0,
-            token_vault_1: &mut ctx.accounts.token_vault_1,
-            tick_array_lower: &mut ctx.accounts.tick_array_lower,
-            tick_array_upper: &mut ctx.accounts.tick_array_upper,
-            recipient_token_account_0: &mut ctx.accounts.recipient_token_account_0,
-            recipient_token_account_1: &mut ctx.accounts.recipient_token_account_1,
-            token_program: ctx.accounts.token_program.clone(),
-            token_program_2022: Some(ctx.accounts.token_program_2022.clone()),
-            memo_program: Some(ctx.accounts.memo_program.clone()),
-            vault_0_mint: Some(ctx.accounts.vault_0_mint.clone()),
-            vault_1_mint: Some(ctx.accounts.vault_1_mint.clone()),
-        };
-
-        instructions::decrease_liquidity(
-            decrease_liquidity_param,
-            ctx.remaining_accounts,
-            liquidity,
-            amount_0_min,
-            amount_1_min,
-        )
+        instructions::decrease_liquidity_v2(ctx, liquidity, amount_0_min, amount_1_min)
     }
 
     /// Swaps one token for as much as possible of another token across a single pool
@@ -584,7 +498,7 @@ pub mod amm_v3 {
     /// * `sqrt_price_limit` - The Q64.64 sqrt price √P limit. If zero for one, the price cannot
     /// * `is_base_input` - swap base input or swap base output
     ///
-    pub fn swap<'a, 'b, 'c, 'info>(
+    pub fn swap<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapSingle<'info>>,
         amount: u64,
         other_amount_threshold: u64,
@@ -610,7 +524,7 @@ pub mod amm_v3 {
     /// * `sqrt_price_limit` - The Q64.64 sqrt price √P limit. If zero for one, the price cannot
     /// * `is_base_input` - swap base input or swap base output
     ///
-    pub fn swap_v2<'a, 'b, 'c, 'info>(
+    pub fn swap_v2<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapSingleV2<'info>>,
         amount: u64,
         other_amount_threshold: u64,
@@ -634,7 +548,7 @@ pub mod amm_v3 {
     /// * `amount_in` - Token amount to be swapped in
     /// * `amount_out_minimum` - Panic if output amount is below minimum amount. For slippage.
     ///
-    pub fn swap_router_base_in<'a, 'b, 'c, 'info>(
+    pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, SwapRouterBaseIn<'info>>,
         amount_in: u64,
         amount_out_minimum: u64,

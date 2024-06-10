@@ -14,12 +14,29 @@ use anchor_spl::{
     },
     token_interface::{Mint, TokenAccount},
 };
+use std::collections::HashSet;
+
+const MINT_WHITELIST: [&'static str; 4] = [
+    "HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM",
+    "Crn4x1Y2HUKko7ox2EZMT6N2t2ZyH7eKtwkBGVnhEq1g",
+    "FrBfWJ4qE5sCzKm3k3JaAtqZcXUh4LvJygDeketsrsH4",
+    "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+];
+
+pub fn invoke_memo_instruction<'info>(
+    memo_msg: &[u8],
+    memo_program: AccountInfo<'info>,
+) -> solana_program::entrypoint::ProgramResult {
+    let ix = spl_memo::build_memo(memo_msg, &Vec::new());
+    let accounts = vec![memo_program];
+    solana_program::program::invoke(&ix, &accounts[..])
+}
 
 pub fn transfer_from_user_to_pool_vault<'info>(
     signer: &Signer<'info>,
     from: &InterfaceAccount<'info, TokenAccount>,
     to_vault: &InterfaceAccount<'info, TokenAccount>,
-    mint: Option<InterfaceAccount<'info, Mint>>,
+    mint: Option<Box<InterfaceAccount<'info, Mint>>>,
     token_program: &AccountInfo<'info>,
     token_program_2022: Option<AccountInfo<'info>>,
     amount: u64,
@@ -66,7 +83,7 @@ pub fn transfer_from_pool_vault_to_user<'info>(
     pool_state_loader: &AccountLoader<'info, PoolState>,
     from_vault: &InterfaceAccount<'info, TokenAccount>,
     to: &InterfaceAccount<'info, TokenAccount>,
-    mint: Option<InterfaceAccount<'info, Mint>>,
+    mint: Option<Box<InterfaceAccount<'info, Mint>>>,
     token_program: &AccountInfo<'info>,
     token_program_2022: Option<AccountInfo<'info>>,
     amount: u64,
@@ -166,7 +183,7 @@ pub fn burn<'a, 'b, 'c, 'info>(
 
 /// Calculate the fee for output amount
 pub fn get_transfer_inverse_fee(
-    mint_account: InterfaceAccount<Mint>,
+    mint_account: Box<InterfaceAccount<Mint>>,
     post_fee_amount: u64,
 ) -> Result<u64> {
     let mint_info = mint_account.to_account_info();
@@ -194,7 +211,10 @@ pub fn get_transfer_inverse_fee(
 }
 
 /// Calculate the fee for input amount
-pub fn get_transfer_fee(mint_account: InterfaceAccount<Mint>, pre_fee_amount: u64) -> Result<u64> {
+pub fn get_transfer_fee(
+    mint_account: Box<InterfaceAccount<Mint>>,
+    pre_fee_amount: u64,
+) -> Result<u64> {
     let mint_info = mint_account.to_account_info();
     if *mint_info.owner == Token::id() {
         return Ok(0);
@@ -217,13 +237,20 @@ pub fn is_supported_mint(mint_account: &InterfaceAccount<Mint>) -> Result<bool> 
     if *mint_info.owner == Token::id() {
         return Ok(true);
     }
+    let mint_whitelist: HashSet<&str> = MINT_WHITELIST.into_iter().collect();
+    if mint_whitelist.contains(mint_account.key().to_string().as_str()) {
+        return Ok(true);
+    }
     let mint_data = mint_info.try_borrow_data()?;
     let mint = StateWithExtensions::<spl_token_2022::state::Mint>::unpack(&mint_data)?;
     let extensions = mint.get_extension_types()?;
-    if extensions.len() == 0
-        || extensions.len() == 1 && extensions[0] == ExtensionType::TransferFeeConfig
-    {
-        return Ok(true);
+    for e in extensions {
+        if e != ExtensionType::TransferFeeConfig
+            && e != ExtensionType::MetadataPointer
+            && e != ExtensionType::TokenMetadata
+        {
+            return Ok(false);
+        }
     }
-    Ok(false)
+    Ok(true)
 }

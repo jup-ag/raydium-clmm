@@ -15,6 +15,7 @@ no-entrypoint = []
 no-idl = []
 cpi = ["no-entrypoint"]
 default = []
+client = []
 no-log-ix-name = []
 init_if_needed = []
 enable-log = []
@@ -22,12 +23,14 @@ devnet = []
 paramset = []
 
 [dependencies]
-anchor-lang = { version = "0.28.0", features = ["init-if-needed"] }
-anchor-spl = "0.28.0"
-solana-program = "1.14.17"
+anchor-lang = { version = "0.29.0", features = ["init-if-needed"] }
+anchor-spl = { version = "0.29.0", features = ["metadata"] }
+solana-program = "1.16"
+spl-memo = "4.0.0"
 uint = "0.9.1"
 bytemuck = { version = "1.4.0", features = ["derive", "min_const_generics"] }
 arrayref = { version = "0.3.6" }
+solana-security-txt = "1.1.1"
 
 [dev-dependencies]
 quickcheck = "0.9"

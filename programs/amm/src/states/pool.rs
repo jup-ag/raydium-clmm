@@ -189,7 +189,7 @@ impl PoolState {
         amm_config: &Account<AmmConfig>,
         token_mint_0: &InterfaceAccount<Mint>,
         token_mint_1: &InterfaceAccount<Mint>,
-        observation_state_loader: &AccountLoader<ObservationState>,
+        observation_state_key: Pubkey,
     ) -> Result<()> {
         self.bump = [bump];
         self.amm_config = amm_config.key();
@@ -227,12 +227,7 @@ impl PoolState {
         self.open_time = open_time;
         self.padding1 = [0; 25];
         self.padding2 = [0; 32];
-
-        let mut observation_state = observation_state_loader.load_mut()?;
-        require_eq!(observation_state.initialized, false);
-        require_keys_eq!(observation_state.pool_id, Pubkey::default());
-        self.observation_key = observation_state_loader.key();
-        observation_state.pool_id = self.key();
+        self.observation_key = observation_state_key;
 
         Ok(())
     }
@@ -355,6 +350,7 @@ impl PoolState {
             let latest_update_timestamp = curr_timestamp.min(reward_info.end_time);
 
             if self.liquidity != 0 {
+                require_gte!(latest_update_timestamp, reward_info.last_update_time);
                 let time_delta = latest_update_timestamp
                     .checked_sub(reward_info.last_update_time)
                     .unwrap();
@@ -452,12 +448,16 @@ impl PoolState {
         Ok(())
     }
 
-    pub fn flip_tick_array_bit(
+    pub fn flip_tick_array_bit<'c: 'info, 'info>(
         &mut self,
-        tickarray_bitmap_extension: &Option<&AccountInfo>,
+        tickarray_bitmap_extension: Option<&'c AccountInfo<'info>>,
         tick_array_start_index: i32,
     ) -> Result<()> {
         if self.is_overflow_default_tickarray_bitmap(vec![tick_array_start_index]) {
+            require_keys_eq!(
+                tickarray_bitmap_extension.unwrap().key(),
+                TickArrayBitmapExtension::key(self.key())
+            );
             AccountLoader::<TickArrayBitmapExtension>::try_from(
                 tickarray_bitmap_extension.unwrap(),
             )?
@@ -566,13 +566,14 @@ impl PoolState {
         self.status.bitand(status) == 0
     }
 
-    pub fn is_overflow_default_tickarray_bitmap(&self, tick_array_start_indexs: Vec<i32>) -> bool {
-        let (max_tick_boundary, min_tick_boundary) = self.tick_range();
-        for tick_index in tick_array_start_indexs {
+    pub fn is_overflow_default_tickarray_bitmap(&self, tick_indexs: Vec<i32>) -> bool {
+        let (min_tick_array_start_index_boundary, max_tick_array_index_boundary) =
+            self.tick_array_start_index_range();
+        for tick_index in tick_indexs {
             let tick_array_start_index =
                 TickArrayState::get_array_start_index(tick_index, self.tick_spacing);
-            if tick_array_start_index >= max_tick_boundary
-                || tick_array_start_index < min_tick_boundary
+            if tick_array_start_index >= max_tick_array_index_boundary
+                || tick_array_start_index < min_tick_array_start_index_boundary
             {
                 return true;
             }
@@ -580,17 +581,24 @@ impl PoolState {
         false
     }
 
-    pub fn tick_range(&self) -> (i32, i32) {
+    // the range of tick array start index that default tickarray bitmap can represent
+    // if tick_spacing = 1, the result range is [-30720, 30720)
+    pub fn tick_array_start_index_range(&self) -> (i32, i32) {
+        // the range of ticks that default tickarrary can represent
         let mut max_tick_boundary =
             tick_array_bit_map::max_tick_in_tickarray_bitmap(self.tick_spacing);
         let mut min_tick_boundary = -max_tick_boundary;
         if max_tick_boundary > tick_math::MAX_TICK {
-            max_tick_boundary = tick_math::MAX_TICK
+            max_tick_boundary =
+                TickArrayState::get_array_start_index(tick_math::MAX_TICK, self.tick_spacing);
+            // find the next tick array start index
+            max_tick_boundary = max_tick_boundary + TickArrayState::tick_count(self.tick_spacing);
         }
         if min_tick_boundary < tick_math::MIN_TICK {
-            min_tick_boundary = tick_math::MIN_TICK
+            min_tick_boundary =
+                TickArrayState::get_array_start_index(tick_math::MIN_TICK, self.tick_spacing);
         }
-        (max_tick_boundary, min_tick_boundary)
+        (min_tick_boundary, max_tick_boundary)
     }
 }
 
@@ -736,11 +744,17 @@ pub struct SwapEvent {
     #[index]
     pub token_account_1: Pubkey,
 
-    /// The delta of the token_0 balance of the pool
+    /// The real delta amount of the token_0 of the pool or user
     pub amount_0: u64,
 
-    /// The delta of the token_1 balance of the pool
+    /// The transfer fee charged by the withheld_amount of the token_0
+    pub transfer_fee_0: u64,
+
+    /// The real delta of the token_1 of the pool or user
     pub amount_1: u64,
+
+    /// The transfer fee charged by the withheld_amount of the token_1
+    pub transfer_fee_1: u64,
 
     /// if true, amount_0 is negtive and amount_1 is positive
     pub zero_for_one: bool,
@@ -779,35 +793,35 @@ pub struct LiquidityChangeEvent {
     pub liquidity_after: u128,
 }
 
-/// Emitted when price move in a swap step
-#[event]
-#[cfg_attr(feature = "client", derive(Debug))]
-pub struct PriceChangeEvent {
-    /// The pool for swap
-    #[index]
-    pub pool_state: Pubkey,
+// /// Emitted when price move in a swap step
+// #[event]
+// #[cfg_attr(feature = "client", derive(Debug))]
+// pub struct PriceChangeEvent {
+//     /// The pool for swap
+//     #[index]
+//     pub pool_state: Pubkey,
 
-    /// The tick of the pool before price change
-    pub tick_before: i32,
+//     /// The tick of the pool before price change
+//     pub tick_before: i32,
 
-    /// The tick of the pool after tprice change
-    pub tick_after: i32,
+//     /// The tick of the pool after tprice change
+//     pub tick_after: i32,
 
-    /// The sqrt(price) of the pool before price change, as a Q64.64
-    pub sqrt_price_x64_before: u128,
+//     /// The sqrt(price) of the pool before price change, as a Q64.64
+//     pub sqrt_price_x64_before: u128,
 
-    /// The sqrt(price) of the pool after price change, as a Q64.64
-    pub sqrt_price_x64_after: u128,
+//     /// The sqrt(price) of the pool after price change, as a Q64.64
+//     pub sqrt_price_x64_after: u128,
 
-    /// The liquidity of the pool before price change
-    pub liquidity_before: u128,
+//     /// The liquidity of the pool before price change
+//     pub liquidity_before: u128,
 
-    /// The liquidity of the pool after price change
-    pub liquidity_after: u128,
+//     /// The liquidity of the pool after price change
+//     pub liquidity_after: u128,
 
-    /// The direction of swap
-    pub zero_for_one: bool,
-}
+//     /// The direction of swap
+//     pub zero_for_one: bool,
+// }
 
 #[cfg(test)]
 pub mod pool_test {
@@ -852,28 +866,28 @@ pub mod pool_test {
         fn get_arrary_start_index_negative() {
             let mut pool_state = PoolState::default();
             pool_state.tick_spacing = 10;
-            pool_state.flip_tick_array_bit(&None, -600).unwrap();
+            pool_state.flip_tick_array_bit(None, -600).unwrap();
             assert!(U1024(pool_state.tick_array_bitmap).bit(511) == true);
 
-            pool_state.flip_tick_array_bit(&None, -1200).unwrap();
+            pool_state.flip_tick_array_bit(None, -1200).unwrap();
             assert!(U1024(pool_state.tick_array_bitmap).bit(510) == true);
 
-            pool_state.flip_tick_array_bit(&None, -1800).unwrap();
+            pool_state.flip_tick_array_bit(None, -1800).unwrap();
             assert!(U1024(pool_state.tick_array_bitmap).bit(509) == true);
 
-            pool_state.flip_tick_array_bit(&None, -38400).unwrap();
+            pool_state.flip_tick_array_bit(None, -38400).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-38400).unwrap())
                     == true
             );
-            pool_state.flip_tick_array_bit(&None, -39000).unwrap();
+            pool_state.flip_tick_array_bit(None, -39000).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-39000).unwrap())
                     == true
             );
-            pool_state.flip_tick_array_bit(&None, -307200).unwrap();
+            pool_state.flip_tick_array_bit(None, -307200).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-307200).unwrap())
@@ -885,7 +899,7 @@ pub mod pool_test {
         fn get_arrary_start_index_positive() {
             let mut pool_state = PoolState::default();
             pool_state.tick_spacing = 10;
-            pool_state.flip_tick_array_bit(&None, 0).unwrap();
+            pool_state.flip_tick_array_bit(None, 0).unwrap();
             assert!(pool_state.get_tick_array_offset(0).unwrap() == 512);
             assert!(
                 U1024(pool_state.tick_array_bitmap)
@@ -893,7 +907,7 @@ pub mod pool_test {
                     == true
             );
 
-            pool_state.flip_tick_array_bit(&None, 600).unwrap();
+            pool_state.flip_tick_array_bit(None, 600).unwrap();
             assert!(pool_state.get_tick_array_offset(600).unwrap() == 513);
             assert!(
                 U1024(pool_state.tick_array_bitmap)
@@ -901,27 +915,49 @@ pub mod pool_test {
                     == true
             );
 
-            pool_state.flip_tick_array_bit(&None, 1200).unwrap();
+            pool_state.flip_tick_array_bit(None, 1200).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(1200).unwrap())
                     == true
             );
 
-            pool_state.flip_tick_array_bit(&None, 38400).unwrap();
+            pool_state.flip_tick_array_bit(None, 38400).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(38400).unwrap())
                     == true
             );
 
-            pool_state.flip_tick_array_bit(&None, 306600).unwrap();
+            pool_state.flip_tick_array_bit(None, 306600).unwrap();
             assert!(pool_state.get_tick_array_offset(306600).unwrap() == 1023);
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(306600).unwrap())
                     == true
             );
+        }
+
+        #[test]
+        fn default_tick_array_start_index_range_test() {
+            let mut pool_state = PoolState::default();
+            pool_state.tick_spacing = 60;
+            // -443580 is the min tick can use to open a position when tick_spacing is 60 due to MIN_TICK is -443636
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-443580]) == false);
+            // 443580 is the min tick can use to open a position when tick_spacing is 60 due to MAX_TICK is 443636
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![443580]) == false);
+
+            pool_state.tick_spacing = 10;
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-307200]) == false);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-307201]) == true);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![307200]) == true);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![307199]) == false);
+
+            pool_state.tick_spacing = 1;
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-30720]) == false);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-30721]) == true);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![30720]) == true);
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![30719]) == false);
         }
     }
 
@@ -1052,9 +1088,9 @@ pub mod pool_test {
             build_tick_array_bitmap_extension_info, BuildExtensionAccountInfo,
         };
 
-        pub fn pool_flip_tick_array_bit_helper(
+        pub fn pool_flip_tick_array_bit_helper<'c: 'info, 'info>(
             pool_state: &mut PoolState,
-            tickarray_bitmap_extension: &Option<&AccountInfo>,
+            tickarray_bitmap_extension: Option<&'c AccountInfo<'info>>,
             init_tick_array_start_indexs: Vec<i32>,
         ) {
             for start_index in init_tick_array_start_indexs {
@@ -1077,7 +1113,7 @@ pub mod pool_test {
 
             pool_flip_tick_array_bit_helper(
                 &mut pool_state,
-                &Some(&tick_array_bitmap_extension_info),
+                Some(&tick_array_bitmap_extension_info),
                 vec![
                     -tick_spacing * TICK_ARRAY_SIZE * 513, // tick in extension
                     tick_spacing * TICK_ARRAY_SIZE * 511,
@@ -1139,7 +1175,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![
                         -tick_spacing * TICK_ARRAY_SIZE * 7394, // max negative tick array start index boundary in extension
                         -tick_spacing * TICK_ARRAY_SIZE * 1000, // tick in extension
@@ -1222,7 +1258,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![
                         tick_spacing * TICK_ARRAY_SIZE * 510,  // tick in pool bitmap
                         tick_spacing * TICK_ARRAY_SIZE * 511,  // tick in pool bitmap
@@ -1295,7 +1331,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![
                         -tick_spacing * TICK_ARRAY_SIZE * 1000, // tick in extension
                         tick_spacing * TICK_ARRAY_SIZE * 512,   // tick in extension boundary
@@ -1337,7 +1373,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![
                         -tick_spacing * TICK_ARRAY_SIZE * 1000, // tick in extension
                         -tick_spacing * TICK_ARRAY_SIZE * 513,  // tick in extension
@@ -1378,7 +1414,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![],
                 );
 
@@ -1425,7 +1461,7 @@ pub mod pool_test {
 
                 pool_flip_tick_array_bit_helper(
                     &mut pool_state,
-                    &Some(&tick_array_bitmap_extension_info),
+                    Some(&tick_array_bitmap_extension_info),
                     vec![
                         -tick_spacing * TICK_ARRAY_SIZE * 7394, // The tickarray where min_tick(-443636) is located
                         tick_spacing * TICK_ARRAY_SIZE * 7393, // The tickarray where max_tick(443636) is located
