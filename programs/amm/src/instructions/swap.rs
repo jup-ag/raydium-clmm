@@ -310,6 +310,12 @@ pub fn swap_on_swap_state(
         pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
+    require_eq!(
+        tick_array_current.start_tick_index,
+        current_vaild_tick_array_start_index,
+        ErrorCode::InvalidFirstTickArrayAccount
+    );
+
     // Unecessary validation for quote estimation
     // let expected_first_tick_array_address = Pubkey::find_program_address(
     //     &[
@@ -388,15 +394,15 @@ pub fn swap_on_swap_state(
                     current_vaild_tick_array_start_index,
                     zero_for_one,
                 )?;
-
-            current_vaild_tick_array_start_index =
+            let next_index =
                 next_initialized_tickarray_index.ok_or(ErrorCode::LiquidityInsufficient)?;
 
-            while tick_array_current.start_tick_index != current_vaild_tick_array_start_index {
+            while tick_array_current.start_tick_index != next_index {
                 tick_array_current = tick_array_states
                     .pop_front()
                     .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
             }
+            current_vaild_tick_array_start_index = next_index;
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
             next_initialized_tick = first_initialized_tick;
@@ -448,6 +454,7 @@ pub fn swap_on_swap_state(
         .ok_or(ErrorCode::InvalidComputation)?;
         #[cfg(feature = "enable-log")]
         msg!("{:#?}", swap_step);
+
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
         step.amount_in = swap_step.amount_in;
         step.amount_out = swap_step.amount_out;

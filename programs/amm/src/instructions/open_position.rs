@@ -817,7 +817,7 @@ pub fn modify_position(
     tick_lower_state: &mut TickState,
     tick_upper_state: &mut TickState,
     timestamp: u64,
-) -> Result<(i64, i64, bool, bool)> {
+) -> Result<(u64, u64, bool, bool)> {
     let (flip_tick_lower, flip_tick_upper) = update_position(
         liquidity_delta,
         pool_state,
