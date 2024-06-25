@@ -54,9 +54,6 @@ pub struct InitializeReward<'info> {
     )]
     pub reward_token_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    #[account(
-        address = anchor_spl::token::ID
-    )]
     pub reward_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -121,7 +118,7 @@ pub fn initialize_reward(
         .as_u64();
     let reward_amount_with_transfer_fee = reward_amount
         .checked_add(
-            util::get_transfer_inverse_fee(*ctx.accounts.reward_token_mint.clone(), reward_amount)
+            util::get_transfer_inverse_fee(ctx.accounts.reward_token_mint.clone(), reward_amount)
                 .unwrap(),
         )
         .unwrap();
@@ -145,7 +142,7 @@ pub fn initialize_reward(
         &ctx.accounts.reward_funder,
         &ctx.accounts.funder_token_account,
         &ctx.accounts.reward_token_vault,
-        Some(*ctx.accounts.reward_token_mint.clone()),
+        Some(ctx.accounts.reward_token_mint.clone()),
         &ctx.accounts.reward_token_program.to_account_info(),
         Some(ctx.accounts.reward_token_program.to_account_info()),
         reward_amount_with_transfer_fee,

@@ -28,12 +28,10 @@ pub fn compute_swap_step(
     if is_base_input {
         // round up amount_in
         // In exact input case, amount_remaining is positive
-        let amount_remaining_less_fee = amount_remaining
-            .mul_div_floor(
-                (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
-                u64::from(FEE_RATE_DENOMINATOR_VALUE),
-            )
-            .unwrap();
+        let amount_remaining_less_fee = amount_remaining.mul_div_floor(
+            (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
+            u64::from(FEE_RATE_DENOMINATOR_VALUE),
+        )?;
         swap_step.amount_in = if zero_for_one {
             liquidity_math::get_delta_amount_0_unsigned(
                 sqrt_price_target_x64,
@@ -139,18 +137,13 @@ pub fn compute_swap_step(
         if is_base_input && swap_step.sqrt_price_next_x64 != sqrt_price_target_x64 {
             // we didn't reach the target, so take the remainder of the maximum input as fee
             // swap dust is granted as fee
-            u64::from(amount_remaining)
-                .checked_sub(swap_step.amount_in)
-                .unwrap()
+            u64::from(amount_remaining).checked_sub(swap_step.amount_in)?
         } else {
             // take pip percentage as fee
-            swap_step
-                .amount_in
-                .mul_div_ceil(
-                    fee_rate.into(),
-                    (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
-                )
-                .unwrap()
+            swap_step.amount_in.mul_div_ceil(
+                fee_rate.into(),
+                (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
+            )?
         };
 
     Some(swap_step)
