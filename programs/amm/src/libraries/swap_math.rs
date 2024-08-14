@@ -35,7 +35,7 @@ pub fn compute_swap_step(
                 (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
                 u64::from(FEE_RATE_DENOMINATOR_VALUE),
             )
-            .unwrap();
+            .ok_or(ErrorCode::CalculateOverflow)?;
 
         (sqrt_price_target_x64, swap_step.amount_in) = calculate_target_price_and_amount(
             sqrt_price_current_x64,
@@ -130,7 +130,7 @@ pub fn compute_swap_step(
             // swap dust is granted as fee
             u64::from(amount_remaining)
                 .checked_sub(swap_step.amount_in)
-                .unwrap()
+                .ok_or(ErrorCode::CalculateOverflow)?
         } else {
             // take pip percentage as fee
             swap_step
@@ -139,7 +139,7 @@ pub fn compute_swap_step(
                     fee_rate.into(),
                     (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
                 )
-                .unwrap()
+                .ok_or(ErrorCode::CalculateOverflow)?
         };
 
     Ok(swap_step)
