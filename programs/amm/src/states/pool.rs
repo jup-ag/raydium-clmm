@@ -6,6 +6,7 @@ use crate::libraries::{
     tick_array_bit_map, tick_math,
 };
 use crate::states::*;
+use crate::util::get_recent_epoch;
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::Mint;
 #[cfg(feature = "enable-log")]
@@ -19,7 +20,7 @@ pub const POOL_REWARD_VAULT_SEED: &str = "pool_reward_vault";
 pub const POOL_TICK_ARRAY_BITMAP_SEED: &str = "pool_tick_array_bitmap_extension";
 // Number of rewards Token
 pub const REWARD_NUM: usize = 3;
-pub const OBSERVATION_UPDATE_DURATION_DEFAULT: u16 = 15;
+
 #[cfg(feature = "paramset")]
 pub mod reward_period_limit {
     pub const MIN_REWARD_PERIOD: u64 = 1 * 60 * 60;
@@ -86,9 +87,8 @@ pub struct PoolState {
     /// The current tick of the pool, i.e. according to the last tick transition that was run.
     pub tick_current: i32,
 
-    /// the most-recently updated index of the observations array
-    pub observation_index: u16,
-    pub observation_update_duration: u16,
+    pub padding3: u16,
+    pub padding4: u16,
 
     /// The fee growth as a Q64.64 number, i.e. fees of token_0 and token_1 collected per
     /// unit of liquidity for the entire life of the pool.
@@ -132,9 +132,11 @@ pub struct PoolState {
 
     // The timestamp allowed for swap in the pool.
     pub open_time: u64,
+    // account recent update epoch
+    pub recent_epoch: u64,
 
     // Unused bytes for future upgrades.
-    pub padding1: [u64; 25],
+    pub padding1: [u64; 24],
     pub padding2: [u64; 32],
 }
 
@@ -204,8 +206,8 @@ impl PoolState {
         self.liquidity = 0;
         self.sqrt_price_x64 = sqrt_price_x64;
         self.tick_current = tick;
-        self.observation_update_duration = OBSERVATION_UPDATE_DURATION_DEFAULT;
-        self.observation_index = 0;
+        self.padding3 = 0;
+        self.padding4 = 0;
         self.reward_infos = [RewardInfo::new(pool_creator); REWARD_NUM];
         self.fee_growth_global_0_x64 = 0;
         self.fee_growth_global_1_x64 = 0;
@@ -225,38 +227,11 @@ impl PoolState {
         self.fund_fees_token_0 = 0;
         self.fund_fees_token_1 = 0;
         self.open_time = open_time;
-        self.padding1 = [0; 25];
+        self.recent_epoch = get_recent_epoch()?;
+        self.padding1 = [0; 24];
         self.padding2 = [0; 32];
         self.observation_key = observation_state_key;
 
-        Ok(())
-    }
-
-    pub fn pool_check_reset(&mut self, sqrt_price_x64: u128, tick: i32) -> Result<()> {
-        require!(
-            tick >= tick_math::MIN_TICK && tick <= tick_math::MAX_TICK,
-            ErrorCode::InvaildTickIndex
-        );
-        if !U1024(self.tick_array_bitmap).is_zero() {
-            return err!(ErrorCode::NotApproved);
-        }
-        self.sqrt_price_x64 = sqrt_price_x64;
-        self.tick_current = tick;
-        self.liquidity = 0;
-        self.observation_index = 0;
-        self.fee_growth_global_0_x64 = 0;
-        self.fee_growth_global_1_x64 = 0;
-        self.protocol_fees_token_0 = 0;
-        self.protocol_fees_token_1 = 0;
-        self.swap_in_amount_token_0 = 0;
-        self.swap_out_amount_token_1 = 0;
-        self.swap_in_amount_token_1 = 0;
-        self.swap_out_amount_token_0 = 0;
-        self.total_fees_token_0 = 0;
-        self.total_fees_claimed_token_0 = 0;
-        self.total_fees_token_1 = 0;
-        self.total_fees_claimed_token_1 = 0;
-        self.reward_infos = [RewardInfo::new(self.owner); REWARD_NUM];
         Ok(())
     }
 
@@ -328,6 +303,7 @@ impl PoolState {
             lowest_index,
             self.reward_infos[lowest_index],
         );
+        self.recent_epoch = get_recent_epoch()?;
         Ok(())
     }
 
@@ -406,6 +382,7 @@ impl PoolState {
         #[cfg(feature = "enable-log")]
         msg!("update pool reward info, reward_0_total_emissioned:{}, reward_1_total_emissioned:{}, reward_2_total_emissioned:{}, pool.liquidity:{}",
         identity(self.reward_infos[0].reward_total_emissioned),identity(self.reward_infos[1].reward_total_emissioned),identity(self.reward_infos[2].reward_total_emissioned), identity(self.liquidity));
+        self.recent_epoch = get_recent_epoch()?;
         Ok(next_reward_infos)
     }
 
@@ -1102,12 +1079,27 @@ pub mod pool_test {
 
         #[test]
         fn get_first_initialized_tick_array_test() {
-            let mut pool_state = PoolState::default();
-            pool_state.tick_spacing = 1;
-            let tick_spacing = pool_state.tick_spacing as i32;
-            pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 511 - 1;
+            let tick_spacing = 1;
+            let tick_current = tick_spacing * TICK_ARRAY_SIZE * 511 - 1;
+
+            let pool_state_refcel = build_pool(
+                tick_current,
+                tick_spacing.try_into().unwrap(),
+                tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                0,
+            );
+
+            let mut pool_state = pool_state_refcel.borrow_mut();
 
             let param: &mut BuildExtensionAccountInfo = &mut BuildExtensionAccountInfo::default();
+            param.key = Pubkey::find_program_address(
+                &[
+                    POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                    pool_state.key().as_ref(),
+                ],
+                &crate::id(),
+            )
+            .0;
             let tick_array_bitmap_extension_info: AccountInfo<'_> =
                 build_tick_array_bitmap_extension_info(param);
 
@@ -1163,13 +1155,29 @@ pub mod pool_test {
             use super::*;
             #[test]
             fn from_pool_bitmap_to_extension_negative_bitmap() {
-                let mut pool_state = PoolState::default();
-                pool_state.tick_spacing = 1;
-                let tick_spacing = pool_state.tick_spacing as i32;
-                pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 511;
+                let tick_spacing = 1;
+                let tick_current = tick_spacing * TICK_ARRAY_SIZE * 511;
+
+                let pool_state_refcel = build_pool(
+                    tick_current,
+                    tick_spacing.try_into().unwrap(),
+                    tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                    0,
+                );
+
+                let mut pool_state = pool_state_refcel.borrow_mut();
 
                 let param: &mut BuildExtensionAccountInfo =
                     &mut BuildExtensionAccountInfo::default();
+                param.key = Pubkey::find_program_address(
+                    &[
+                        POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                        pool_state.key().as_ref(),
+                    ],
+                    &crate::id(),
+                )
+                .0;
+
                 let tick_array_bitmap_extension_info: AccountInfo<'_> =
                     build_tick_array_bitmap_extension_info(param);
 
@@ -1201,7 +1209,7 @@ pub mod pool_test {
                         true,
                     )
                     .unwrap();
-                assert!(start_index.unwrap() == tick_spacing * TICK_ARRAY_SIZE * 510);
+                assert_eq!(start_index.unwrap(), tick_spacing * TICK_ARRAY_SIZE * 510);
 
                 pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 510;
                 let start_index = pool_state
@@ -1246,13 +1254,28 @@ pub mod pool_test {
 
             #[test]
             fn from_pool_bitmap_to_extension_positive_bitmap() {
-                let mut pool_state = PoolState::default();
-                pool_state.tick_spacing = 1;
-                let tick_spacing = pool_state.tick_spacing as i32;
-                pool_state.tick_current = 0;
+                let tick_spacing = 1;
+                let tick_current = 0;
+
+                let pool_state_refcel = build_pool(
+                    tick_current,
+                    tick_spacing.try_into().unwrap(),
+                    tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                    0,
+                );
+
+                let mut pool_state = pool_state_refcel.borrow_mut();
 
                 let param: &mut BuildExtensionAccountInfo =
                     &mut BuildExtensionAccountInfo::default();
+                param.key = Pubkey::find_program_address(
+                    &[
+                        POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                        pool_state.key().as_ref(),
+                    ],
+                    &crate::id(),
+                )
+                .0;
                 let tick_array_bitmap_extension_info: AccountInfo<'_> =
                     build_tick_array_bitmap_extension_info(param);
 
@@ -1319,13 +1342,29 @@ pub mod pool_test {
 
             #[test]
             fn from_extension_negative_bitmap_to_extension_positive_bitmap() {
-                let mut pool_state = PoolState::default();
-                pool_state.tick_spacing = 1;
-                let tick_spacing = pool_state.tick_spacing as i32;
-                pool_state.tick_current = -tick_spacing * TICK_ARRAY_SIZE * 999;
+                let tick_spacing = 1;
+                let tick_current = -tick_spacing * TICK_ARRAY_SIZE * 999;
+
+                let pool_state_refcel = build_pool(
+                    tick_current,
+                    tick_spacing.try_into().unwrap(),
+                    tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                    0,
+                );
+
+                let mut pool_state = pool_state_refcel.borrow_mut();
 
                 let param: &mut BuildExtensionAccountInfo =
                     &mut BuildExtensionAccountInfo::default();
+                param.key = Pubkey::find_program_address(
+                    &[
+                        POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                        pool_state.key().as_ref(),
+                    ],
+                    &crate::id(),
+                )
+                .0;
+
                 let tick_array_bitmap_extension_info: AccountInfo<'_> =
                     build_tick_array_bitmap_extension_info(param);
 
@@ -1361,13 +1400,28 @@ pub mod pool_test {
 
             #[test]
             fn from_extension_positive_bitmap_to_extension_negative_bitmap() {
-                let mut pool_state = PoolState::default();
-                pool_state.tick_spacing = 1;
-                let tick_spacing = pool_state.tick_spacing as i32;
-                pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 999;
+                let tick_spacing = 1;
+                let tick_current = tick_spacing * TICK_ARRAY_SIZE * 999;
+
+                let pool_state_refcel = build_pool(
+                    tick_current,
+                    tick_spacing.try_into().unwrap(),
+                    tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                    0,
+                );
+
+                let mut pool_state = pool_state_refcel.borrow_mut();
 
                 let param: &mut BuildExtensionAccountInfo =
                     &mut BuildExtensionAccountInfo::default();
+                param.key = Pubkey::find_program_address(
+                    &[
+                        POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                        pool_state.key().as_ref(),
+                    ],
+                    &crate::id(),
+                )
+                .0;
                 let tick_array_bitmap_extension_info: AccountInfo<'_> =
                     build_tick_array_bitmap_extension_info(param);
 
@@ -1449,13 +1503,28 @@ pub mod pool_test {
 
             #[test]
             fn min_tick_max_tick_initialized_test() {
-                let mut pool_state = PoolState::default();
-                pool_state.tick_spacing = 1;
-                pool_state.tick_current = 0;
-                let tick_spacing = pool_state.tick_spacing as i32;
+                let tick_spacing = 1;
+                let tick_current = 0;
+
+                let pool_state_refcel = build_pool(
+                    tick_current,
+                    tick_spacing.try_into().unwrap(),
+                    tick_math::get_sqrt_price_at_tick(tick_current).unwrap(),
+                    0,
+                );
+
+                let mut pool_state = pool_state_refcel.borrow_mut();
 
                 let param: &mut BuildExtensionAccountInfo =
                     &mut BuildExtensionAccountInfo::default();
+                param.key = Pubkey::find_program_address(
+                    &[
+                        POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                        pool_state.key().as_ref(),
+                    ],
+                    &crate::id(),
+                )
+                .0;
                 let tick_array_bitmap_extension_info: AccountInfo<'_> =
                     build_tick_array_bitmap_extension_info(param);
 

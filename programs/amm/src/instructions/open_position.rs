@@ -633,7 +633,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
                 tick_math::get_sqrt_price_at_tick(tick_lower_index)?,
                 tick_math::get_sqrt_price_at_tick(tick_upper_index)?,
                 amount_0_max.checked_sub(amount_0_transfer_fee).unwrap(),
-            );
+            )?;
             #[cfg(feature = "enable-log")]
             msg!(
                 "liquidity: {}, amount_0_max:{}, amount_0_transfer_fee:{}",
@@ -651,7 +651,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
                 tick_math::get_sqrt_price_at_tick(tick_lower_index)?,
                 tick_math::get_sqrt_price_at_tick(tick_upper_index)?,
                 amount_1_max.checked_sub(amount_1_transfer_fee).unwrap(),
-            );
+            )?;
             #[cfg(feature = "enable-log")]
             msg!(
                 "liquidity: {}, amount_1_max:{}, amount_1_transfer_fee:{}",
@@ -817,7 +817,7 @@ pub fn modify_position(
     tick_lower_state: &mut TickState,
     tick_upper_state: &mut TickState,
     timestamp: u64,
-) -> Result<(i64, i64, bool, bool)> {
+) -> Result<(u64, u64, bool, bool)> {
     let (flip_tick_lower, flip_tick_upper) = update_position(
         liquidity_delta,
         pool_state,

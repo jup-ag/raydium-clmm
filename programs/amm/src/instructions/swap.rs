@@ -150,7 +150,7 @@ pub fn swap_internal<'b, 'info>(
     is_base_input: bool,
     block_timestamp: u32,
 ) -> Result<(u64, u64)> {
-    require!(amount_specified != 0, ErrorCode::InvaildSwapAmountSpecified);
+    require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
         return err!(ErrorCode::NotApproved);
     }
@@ -210,18 +210,8 @@ pub fn swap_internal<'b, 'info>(
         pool_state.tick_current = state.tick;
     }
     // update the previous price to the observation
-    let next_observation_index = observation_state
-        .update_check(
-            block_timestamp,
-            pool_state.sqrt_price_x64,
-            pool_state.observation_index,
-            pool_state.observation_update_duration.into(),
-        )
-        .unwrap();
-    match next_observation_index {
-        Option::Some(index) => pool_state.observation_index = index,
-        Option::None => {}
-    }
+    observation_state.update(block_timestamp, pool_state.tick_current);
+
     pool_state.sqrt_price_x64 = state.sqrt_price_x64;
 
     if liquidity_start != state.liquidity {
@@ -460,8 +450,7 @@ pub fn swap_on_swap_state(
             amm_config.trade_fee_rate,
             is_base_input,
             zero_for_one,
-        )
-        .ok_or(ErrorCode::InvalidComputation)?;
+        )?;
         #[cfg(feature = "enable-log")]
         msg!("{:#?}", swap_step);
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
@@ -859,12 +848,18 @@ pub fn swap<'a, 'b, 'c: 'info, 'info>(
 
 #[cfg(test)]
 mod swap_test {
+    use liquidity_math::get_delta_amounts_signed;
+    use tick_array_bitmap_extension_test::{
+        build_tick_array_bitmap_extension_info, BuildExtensionAccountInfo,
+    };
+
     use super::*;
     use crate::states::pool_test::build_pool;
     use crate::states::tick_array_test::{
         build_tick, build_tick_array_with_tick_states, TickArrayInfo,
     };
     use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::vec;
 
     pub fn get_tick_array_states_mut(
@@ -1716,6 +1711,817 @@ mod swap_test {
                 pool_state.borrow().tick_current > -28860
                     && pool_state.borrow().tick_current <= -28800
             );
+        }
+    }
+
+    #[cfg(test)]
+    mod sqrt_price_limit_optimization_min_specified_test {
+        use super::*;
+        #[test]
+        fn zero_for_one_base_input_with_min_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = true;
+            let is_base_input = true;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX - 1;
+            let amount_1 = u64::MAX - 1;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = 1;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+
+        #[test]
+        fn zero_for_one_base_out_with_min_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = true;
+            let is_base_input = false;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX - 1;
+            let amount_1 = u64::MAX - 1;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = 1;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+
+        #[test]
+        fn one_for_zero_base_in_with_min_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = false;
+            let is_base_input = true;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX - 1;
+            let amount_1 = u64::MAX - 1;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = 1;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+        #[test]
+        fn one_for_zero_base_out_with_min_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = false;
+            let is_base_input = false;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX - 1;
+            let amount_1 = u64::MAX - 1;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = 1;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+    }
+    #[cfg(test)]
+    mod sqrt_price_limit_optimization_max_specified_test {
+        use super::*;
+        #[test]
+        fn zero_for_one_base_input_with_max_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = true;
+            let is_base_input = true;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX / 2;
+            let amount_1 = u64::MAX / 2;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = u64::MAX / 2;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+
+        #[test]
+        fn zero_for_one_base_out_with_max_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = true;
+            let is_base_input = false;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX / 2;
+            let amount_1 = u64::MAX / 2;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = u64::MAX / 4;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+
+        #[test]
+        fn one_for_zero_base_in_with_max_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = false;
+            let is_base_input = true;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX / 2;
+            let amount_1 = u64::MAX / 2;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = u64::MAX / 2;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+        #[test]
+        fn one_for_zero_base_out_with_min_amount_specified() {
+            let tick_spacing = 10;
+            let zero_for_one = false;
+            let is_base_input = false;
+            let tick_lower = tick_math::MIN_TICK + 1;
+            let tick_upper = tick_math::MAX_TICK - 1;
+            let tick_current = 0;
+            let amount_0 = u64::MAX / 2;
+            let amount_1 = u64::MAX / 2;
+
+            let (
+                amm_config,
+                pool_state,
+                tick_array_states,
+                observation_state,
+                bitmap_extension_state,
+                sum_amount_0,
+                sum_amount_1,
+            ) = setup_swap_test(
+                tick_current,
+                tick_spacing as u16,
+                vec![OpenPositionParam {
+                    amount_0: amount_0,
+                    amount_1: amount_1,
+                    tick_lower: tick_lower,
+                    tick_upper: tick_upper,
+                }],
+                zero_for_one,
+            );
+            println!(
+                "sum_amount_0: {}, sum_amount_1: {}",
+                sum_amount_0, sum_amount_1,
+            );
+            let amount_specified = u64::MAX / 4;
+            let result = swap_internal(
+                &amm_config,
+                &mut pool_state.borrow_mut(),
+                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                &mut observation_state.borrow_mut(),
+                &Some(bitmap_extension_state),
+                amount_specified,
+                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                zero_for_one,
+                is_base_input,
+                1,
+            );
+            println!("{:#?}", result);
+            let pool = pool_state.borrow();
+            let sqrt_price_x64 = pool.sqrt_price_x64;
+            let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
+            println!("price: {}", sqrt_price * sqrt_price);
+        }
+    }
+    #[cfg(test)]
+    mod sqrt_price_limit_optimization_test {
+        use super::*;
+        use proptest::prelude::*;
+        use std::{convert::identity, u64};
+
+        use proptest::prop_assume;
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(2048))]
+
+            #[test]
+            fn zero_for_one_base_input_test(
+                tick_current in tick_math::MIN_TICK..tick_math::MAX_TICK,
+                amount_0 in 1000000..u64::MAX,
+                amount_1 in 1000000..u64::MAX,
+                tick_lower in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 10", |x| x % 10 == 0),
+                tick_upper in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 10", |x| x % 10 == 0),
+            ){
+                let tick_spacing = 10;
+                let zero_for_one = true;
+                let is_base_input = true;
+                if tick_lower%tick_spacing ==0 && tick_upper%tick_spacing ==0 && tick_upper>tick_lower{
+
+                    let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, sum_amount_1) = setup_swap_test(
+                        tick_current,
+                        tick_spacing as u16,
+                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        zero_for_one
+                        );
+
+                    prop_assume!(sum_amount_1 > 1);
+                    let mut rng = rand::thread_rng();
+                    let amount_specified  = rng.gen_range(1..u64::MAX - sum_amount_0);
+
+                    let result = swap_internal(
+                        &amm_config,
+                        &mut pool_state.borrow_mut(),
+                        &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                        &mut observation_state.borrow_mut(),
+                        &Some(bitmap_extension_state),
+                        amount_specified,
+                        tick_math::MIN_SQRT_PRICE_X64 + 1,
+                        zero_for_one,
+                        is_base_input,
+                        0,
+                    );
+
+                    if result.is_ok() {
+                        let ( amount_0_before, amount_1_before) = result.unwrap();
+
+                        let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
+                            tick_current,
+                            tick_spacing as u16,
+                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            zero_for_one
+                        );
+                        let result = swap_internal(
+                            &amm_config,
+                            &mut pool_state.borrow_mut(),
+                            &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                            &mut observation_state.borrow_mut(),
+                            &Some(bitmap_extension_state),
+                            amount_specified,
+                            tick_math::MIN_SQRT_PRICE_X64 + 1,
+                            zero_for_one,
+                            is_base_input,
+                            oracle::block_timestamp_mock() as u32,
+                        );
+                        assert!(result.is_ok());
+
+                        // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{},liquidity:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper, identity(pool_state.borrow().liquidity));
+
+                        let ( amount_0_after, amount_1_after) = result.unwrap();
+                        assert_eq!(amount_0_before, amount_0_after);
+                        assert_eq!(amount_1_before, amount_1_after);
+
+                    }else{
+                        let err =  result.err().unwrap();
+                        if err == crate::error::ErrorCode::MaxTokenOverflow.into(){
+                            println!("##### original swap is overflow ");
+                            let result = swap_internal(
+                                &amm_config,
+                                &mut pool_state.borrow_mut(),
+                                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                                &mut observation_state.borrow_mut(),
+                                &Some(bitmap_extension_state),
+                                amount_specified,
+                                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                                zero_for_one,
+                                is_base_input,
+                                oracle::block_timestamp_mock() as u32,
+                            );
+                            if result.is_err(){
+                                println!("{:#?}", result);
+                            }
+                        }else{
+                            println!("{}", err);
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn zero_for_one_base_output_test(
+                tick_current in tick_math::MIN_TICK..tick_math::MAX_TICK,
+                amount_0 in 1000000..u64::MAX,
+                amount_1 in 1000000..u64::MAX,
+                tick_lower in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+                tick_upper in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+            ){
+                let tick_spacing = 10;
+                let zero_for_one = true;
+                let base_input= false;
+                if tick_lower%tick_spacing ==0 && tick_upper%tick_spacing ==0 && tick_upper>tick_lower{
+                    let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state, _sum_amount_0, sum_amount_1) = setup_swap_test(
+                        tick_current,
+                        tick_spacing as u16,
+                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        zero_for_one
+                    );
+
+                    prop_assume!(sum_amount_1 > 1);
+                    let mut rng = rand::thread_rng();
+                    let amount_specified  = rng.gen_range(1..sum_amount_1);
+                    // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper);
+                    let result = swap_internal(
+                        &amm_config,
+                        &mut pool_state.borrow_mut(),
+                        &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                        &mut observation_state.borrow_mut(),
+                        &Some(bitmap_extension_state),
+                        amount_specified,
+                        tick_math::MIN_SQRT_PRICE_X64 + 1,
+                        zero_for_one,
+                        base_input,
+                        0,
+                    );
+
+                    if result.is_ok() {
+                        let ( amount_0_before, amount_1_before) = result.unwrap();
+
+                        let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state, _sum_amount_0, _sum_amount_1) = setup_swap_test(
+                            tick_current,
+                            tick_spacing as u16,
+                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            zero_for_one
+                        );
+                        let result = swap_internal(
+                            &amm_config,
+                            &mut pool_state.borrow_mut(),
+                            &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                            &mut observation_state.borrow_mut(),
+                            &Some(bitmap_extension_state),
+                            amount_specified,
+                            tick_math::MIN_SQRT_PRICE_X64 + 1,
+                            zero_for_one,
+                            base_input,
+                            oracle::block_timestamp_mock() as u32,
+                        );
+                        assert!(result.is_ok());
+
+                        println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{},liquidity:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper, identity(pool_state.borrow().liquidity));
+
+                        let ( amount_0_after, amount_1_after) = result.unwrap();
+                        assert_eq!(amount_0_before, amount_0_after);
+                        assert_eq!(amount_1_before, amount_1_after);
+
+                    }else{
+                        let err =  result.err().unwrap();
+                        if err == crate::error::ErrorCode::MaxTokenOverflow.into(){
+                            println!("##### original swap is overflow");
+                            let result = swap_internal(
+                                &amm_config,
+                                &mut pool_state.borrow_mut(),
+                                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                                &mut observation_state.borrow_mut(),
+                                &Some(bitmap_extension_state),
+                                amount_specified,
+                                tick_math::MIN_SQRT_PRICE_X64 + 1,
+                                zero_for_one,
+                                base_input,
+                                oracle::block_timestamp_mock() as u32,
+                            );
+                            if result.is_err(){
+                                println!("{:#?}", result);
+                            }
+                        }else{
+                            println!("{}", err);
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn one_for_zero_base_input_test(
+                tick_current in tick_math::MIN_TICK..tick_math::MAX_TICK,
+                amount_0 in 1000000..u64::MAX,
+                amount_1 in 1000000..u64::MAX,
+                tick_lower in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+                tick_upper in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+            ){
+                let tick_spacing = 10;
+                let zero_for_one = false;
+                let is_base_input = true;
+                if tick_lower%tick_spacing ==0 && tick_upper%tick_spacing ==0 && tick_current>tick_lower && tick_current<tick_upper{
+                    // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper);
+                    let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, sum_amount_1) = setup_swap_test(
+                        tick_current,
+                        tick_spacing as u16,
+                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        zero_for_one
+                    );
+
+                    prop_assume!(sum_amount_0 > 1);
+                    let mut rng = rand::thread_rng();
+                    let amount_specified  = rng.gen_range(1..u64::MAX - sum_amount_1);
+
+                    let result = swap_internal(
+                        &amm_config,
+                        &mut pool_state.borrow_mut(),
+                        &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                        &mut observation_state.borrow_mut(),
+                        &Some(bitmap_extension_state),
+                        amount_specified,
+                        tick_math::MAX_SQRT_PRICE_X64 - 1,
+                        zero_for_one,
+                        is_base_input,
+                        0,
+                    );
+
+
+                    if result.is_ok() {
+                        let ( amount_0_before, amount_1_before) = result.unwrap();
+
+                        let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
+                            tick_current,
+                            tick_spacing as u16,
+                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            zero_for_one
+                        );
+                        let result = swap_internal(
+                            &amm_config,
+                            &mut pool_state.borrow_mut(),
+                            &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                            &mut observation_state.borrow_mut(),
+                            &Some(bitmap_extension_state),
+                            amount_specified,
+                            tick_math::MAX_SQRT_PRICE_X64 - 1,
+                            zero_for_one,
+                            is_base_input,
+                            oracle::block_timestamp_mock() as u32,
+                        );
+                        assert!(result.is_ok());
+
+                        // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{},liquidity:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper, identity(pool_state.borrow().liquidity));
+
+                        let (amount_0_after, amount_1_after) = result.unwrap();
+                        assert_eq!(amount_0_before, amount_0_after);
+                        assert_eq!(amount_1_before, amount_1_after);
+
+                    }else {
+                        let err =  result.err().unwrap();
+                        if err == crate::error::ErrorCode::MaxTokenOverflow.into(){
+                            // println!("##### original swap is overflow ");
+                            let _result = swap_internal(
+                                &amm_config,
+                                &mut pool_state.borrow_mut(),
+                                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                                &mut observation_state.borrow_mut(),
+                                &Some(bitmap_extension_state),
+                                amount_specified,
+                                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                                zero_for_one,
+                                is_base_input,
+                                oracle::block_timestamp_mock() as u32,
+                            );
+
+                        }else{
+                            println!("{}", err);
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn one_for_zero_base_output_test(
+                tick_current in tick_math::MIN_TICK..tick_math::MAX_TICK,
+                amount_0 in 1000000..u64::MAX,
+                amount_1 in 1000000..u64::MAX,
+                tick_lower in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+                tick_upper in (tick_math::MIN_TICK..=tick_math::MAX_TICK).prop_filter("Must be multiple of 100", |x| x % 10 == 0),
+            ){
+                let tick_spacing = 10;
+                let zero_for_one = false;
+                let is_base_input = false;
+                if tick_lower%tick_spacing ==0 && tick_upper%tick_spacing ==0 && tick_current>tick_lower && tick_current<tick_upper{
+
+                    // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper);
+                    let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, _sum_amount_1) = setup_swap_test(
+                        tick_current,
+                        tick_spacing as u16,
+                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        zero_for_one
+                    );
+                    prop_assume!(sum_amount_0 > 1);
+                    let mut rng = rand::thread_rng();
+                    let amount_specified  = rng.gen_range(1..sum_amount_0);
+
+                    let result = swap_internal(
+                        &amm_config,
+                        &mut pool_state.borrow_mut(),
+                        &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                        &mut observation_state.borrow_mut(),
+                        &Some(bitmap_extension_state),
+                        amount_specified,
+                        tick_math::MAX_SQRT_PRICE_X64 - 1,
+                        zero_for_one,
+                        is_base_input,
+                        0,
+                    );
+
+                    if result.is_ok() {
+                        let ( amount_0_before, amount_1_before) = result.unwrap();
+
+                        let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
+                            tick_current,
+                            tick_spacing as u16,
+                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            zero_for_one
+                        );
+                        let result = swap_internal(
+                            &amm_config,
+                            &mut pool_state.borrow_mut(),
+                            &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                            &mut observation_state.borrow_mut(),
+                            &Some(bitmap_extension_state),
+                            amount_specified,
+                            tick_math::MAX_SQRT_PRICE_X64 - 1,
+                            zero_for_one,
+                            is_base_input,
+                            oracle::block_timestamp_mock() as u32,
+                        );
+                        assert!(result.is_ok());
+
+                        // println!("----- input: tick_current:{}, amount_0:{}, amount_1:{}, amount_specified:{},tick_lower:{}, tick_upper:{},liquidity:{}", tick_current, amount_0, amount_1,amount_specified, tick_lower, tick_upper, identity(pool_state.borrow().liquidity));
+
+                        let (amount_0_after, amount_1_after) = result.unwrap();
+                        assert_eq!(amount_0_before, amount_0_after);
+                        assert_eq!(amount_1_before, amount_1_after);
+
+                    }else {
+                        let err =  result.err().unwrap();
+                        if err == crate::error::ErrorCode::MaxTokenOverflow.into(){
+                            println!("##### original swap is overflow ");
+                            let _result = swap_internal(
+                                &amm_config,
+                                &mut pool_state.borrow_mut(),
+                                &mut get_tick_array_states_mut(&tick_array_states).borrow_mut(),
+                                &mut observation_state.borrow_mut(),
+                                &Some(bitmap_extension_state),
+                                amount_specified,
+                                tick_math::MAX_SQRT_PRICE_X64 - 1,
+                                zero_for_one,
+                                is_base_input,
+                                oracle::block_timestamp_mock() as u32,
+                            );
+                        }else{
+                            println!("{}", err);
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::libraries::{big_num::U256, fixed_point_64, full_math::MulDiv};
 use crate::pool::REWARD_NUM;
+use crate::util::get_recent_epoch;
 use anchor_lang::prelude::*;
 
 #[account]
@@ -37,8 +38,10 @@ pub struct PersonalPositionState {
 
     // Position reward info
     pub reward_infos: [PositionRewardInfo; REWARD_NUM],
+    // account update recent epoch
+    pub recent_epoch: u64,
     // Unused bytes for future upgrades.
-    pub padding: [u64; 8],
+    pub padding: [u64; 7],
 }
 
 impl PersonalPositionState {
@@ -77,6 +80,7 @@ impl PersonalPositionState {
             }
             self.reward_infos[i].growth_inside_last_x64 = reward_growth_inside;
         }
+        self.recent_epoch = get_recent_epoch()?;
         Ok(())
     }
 }
