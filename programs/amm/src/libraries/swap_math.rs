@@ -177,11 +177,11 @@ fn calculate_amount_in_range(
         if let Ok(result) = result {
             return Ok(Some(result));
         } else {
-            let err = result.err().unwrap();
-            if err == crate::error::ErrorCode::MaxTokenOverflow.into() {
+            if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
                 return Ok(None);
+            } else {
+                return Err(ErrorCode::SqrtPriceLimitOverflow.into());
             }
-            return Err(ErrorCode::SqrtPriceLimitOverflow.into());
         }
     } else {
         let result = if zero_for_one {
@@ -205,8 +205,9 @@ fn calculate_amount_in_range(
             let err = result.err().unwrap();
             if err == crate::error::ErrorCode::MaxTokenOverflow.into() {
                 return Ok(None);
+            } else {
+                return Err(ErrorCode::SqrtPriceLimitOverflow.into());
             }
-            return Err(ErrorCode::SqrtPriceLimitOverflow.into());
         }
     }
 }
@@ -238,7 +239,7 @@ mod swap_math_test {
                 amount_remaining,
                 fee_rate,
                 is_base_input,
-                1,
+                zero_for_one,
             ).unwrap();
 
             let amount_in = swap_step.amount_in;
