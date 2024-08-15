@@ -585,8 +585,6 @@ pub fn swap_on_swap_state(
         .pop_front()
         .ok_or(ErrorCode::InsufficientTickArrayStates)?;
 
-    let liquidity_start = pool_state.liquidity;
-
     for _ in 0..tick_array_states.len() {
         if tick_array_current.start_tick_index == current_vaild_tick_array_start_index {
             break;
@@ -596,24 +594,17 @@ pub fn swap_on_swap_state(
             .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
     }
 
-    require_eq!(
-        tick_array_current.start_tick_index,
-        current_vaild_tick_array_start_index,
-        ErrorCode::InvalidFirstTickArrayAccount
-    );
+    let mut loop_count = 0;
 
-    while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "while begin, is_base_input:{},fee_growth_global_x32:{}, state_sqrt_price_x64:{}, state_tick:{},state_liquidity:{},state.protocol_fee:{}, protocol_fee_rate:{}",
-            is_base_input,
-            state.fee_growth_global_x64,
-            state.sqrt_price_x64,
-            state.tick,
-            state.liquidity,
-            state.protocol_fee,
-            amm_config.protocol_fee_rate
-        );
+    while state.amount_specified_remaining != 0
+        && state.sqrt_price_x64 != sqrt_price_limit_x64
+        && state.tick < tick_math::MAX_TICK
+        && state.tick > tick_math::MIN_TICK
+    {
+        if loop_count > 10 {
+            return Result::Err(ErrorCode::InvalidComputation.into());
+        }
+
         // Save these three pieces of information for PriceChangeEvent
         // let tick_before = state.tick;
         // let sqrt_price_x64_before = state.sqrt_price_x64;
@@ -634,13 +625,7 @@ pub fn swap_on_swap_state(
                 TickState::default()
             }
         };
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "next_initialized_tick, status:{}, tick_index:{}, tick_array_current:{}",
-            next_initialized_tick.is_initialized(),
-            identity(next_initialized_tick.tick),
-            tick_array_current.key().to_string(),
-        );
+
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
@@ -657,7 +642,7 @@ pub fn swap_on_swap_state(
                     .pop_front()
                     .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
                 // check the tick_array account is owned by the pool
-                require_keys_eq!(tick_array_current.pool_id, pool_state.key());
+                // require_keys_eq!(tick_array_current.pool_id, pool_state.key());
             }
             current_vaild_tick_array_start_index = next_initialized_tickarray_index.unwrap();
 
@@ -682,23 +667,16 @@ pub fn swap_on_swap_state(
             step.sqrt_price_next_x64
         };
 
-        if zero_for_one {
-            require_gte!(state.tick, step.tick_next);
-            require_gte!(step.sqrt_price_start_x64, step.sqrt_price_next_x64);
-            require_gte!(step.sqrt_price_start_x64, target_price);
-        } else {
-            require_gt!(step.tick_next, state.tick);
-            require_gte!(step.sqrt_price_next_x64, step.sqrt_price_start_x64);
-            require_gte!(target_price, step.sqrt_price_start_x64);
-        }
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "sqrt_price_current_x64:{}, sqrt_price_target:{}, liquidity:{}, amount_remaining:{}",
-            step.sqrt_price_start_x64,
-            target_price,
-            state.liquidity,
-            state.amount_specified_remaining
-        );
+        // if zero_for_one {
+        //     require_gte!(state.tick, step.tick_next);
+        //     require_gte!(step.sqrt_price_start_x64, step.sqrt_price_next_x64);
+        //     require_gte!(step.sqrt_price_start_x64, target_price);
+        // } else {
+        //     require_gt!(step.tick_next, state.tick);
+        //     require_gte!(step.sqrt_price_next_x64, step.sqrt_price_start_x64);
+        //     require_gte!(target_price, step.sqrt_price_start_x64);
+        // }
+
         let swap_step = swap_math::compute_swap_step(
             step.sqrt_price_start_x64,
             target_price,
@@ -708,13 +686,13 @@ pub fn swap_on_swap_state(
             is_base_input,
             zero_for_one,
         )?;
-        #[cfg(feature = "enable-log")]
-        msg!("{:#?}", swap_step);
-        if zero_for_one {
-            require_gte!(swap_step.sqrt_price_next_x64, target_price);
-        } else {
-            require_gte!(target_price, swap_step.sqrt_price_next_x64);
-        }
+
+        // if zero_for_one {
+        //     require_gte!(swap_step.sqrt_price_next_x64, target_price);
+        // } else {
+        //     require_gte!(target_price, swap_step.sqrt_price_next_x64);
+        // }
+
         state.sqrt_price_x64 = swap_step.sqrt_price_next_x64;
         step.amount_in = swap_step.amount_in;
         step.amount_out = swap_step.amount_out;
@@ -723,7 +701,11 @@ pub fn swap_on_swap_state(
         if is_base_input {
             state.amount_specified_remaining = state
                 .amount_specified_remaining
-                .checked_sub(step.amount_in + step.fee_amount)
+                .checked_sub(
+                    step.amount_in
+                        .checked_add(step.fee_amount)
+                        .ok_or(ErrorCode::InvalidComputation)?,
+                )
                 .ok_or(ErrorCode::InvalidComputation)?;
             state.amount_calculated = state
                 .amount_calculated
@@ -758,10 +740,6 @@ pub fn swap_on_swap_state(
                 .fee_amount
                 .checked_sub(delta)
                 .ok_or(ErrorCode::InvalidComputation)?;
-            state.protocol_fee = state
-                .protocol_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::InvalidComputation)?;
         }
         // if the fund fee is on, calculate how much is owed, decrement fee_amount, and increment fund_fee
         if amm_config.fund_fee_rate > 0 {
@@ -775,37 +753,11 @@ pub fn swap_on_swap_state(
                 .fee_amount
                 .checked_sub(delta)
                 .ok_or(ErrorCode::InvalidComputation)?;
-            state.fund_fee = state
-                .fund_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::InvalidComputation)?;
         }
-        // shift tick if we reached the next price
-        if state.sqrt_price_x64 == step.sqrt_price_next_x64 {
-            // if the tick is initialized, run the tick transition
-            if step.initialized {
-                #[cfg(feature = "enable-log")]
-                msg!("loading next tick {}", step.tick_next);
 
-                let mut liquidity_net = next_initialized_tick.cross(
-                    if zero_for_one {
-                        state.fee_growth_global_x64
-                    } else {
-                        pool_state.fee_growth_global_0_x64
-                    },
-                    if zero_for_one {
-                        pool_state.fee_growth_global_1_x64
-                    } else {
-                        state.fee_growth_global_x64
-                    },
-                    &updated_reward_infos,
-                );
-                // update tick_state to tick_array account
-                // tick_array_current.update_tick_state(
-                //     next_initialized_tick.tick,
-                //     pool_state.tick_spacing.into(),
-                //     *next_initialized_tick,
-                // )?;
+        if state.sqrt_price_x64 == step.sqrt_price_next_x64 {
+            if step.initialized {
+                let mut liquidity_net = next_initialized_tick.liquidity_net;
 
                 if zero_for_one {
                     liquidity_net = liquidity_net.neg();
@@ -826,32 +778,7 @@ pub fn swap_on_swap_state(
             state.tick = tick_math::get_tick_at_sqrt_price(state.sqrt_price_x64)?;
         }
 
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "end, is_base_input:{},step_amount_in:{}, step_amount_out:{}, step_fee_amount:{},fee_growth_global_x32:{}, state_sqrt_price_x64:{}, state_tick:{}, state_liquidity:{},state.protocol_fee:{}, protocol_fee_rate:{}, state.fund_fee:{}, fund_fee_rate:{}",
-            is_base_input,
-            step.amount_in,
-            step.amount_out,
-            step.fee_amount,
-            state.fee_growth_global_x64,
-            state.sqrt_price_x64,
-            state.tick,
-            state.liquidity,
-            state.protocol_fee,
-            amm_config.protocol_fee_rate,
-            state.fund_fee,
-            amm_config.fund_fee_rate,
-        );
-        // emit!(PriceChangeEvent {
-        //     pool_state: pool_state.key(),
-        //     tick_before,
-        //     tick_after: state.tick,
-        //     sqrt_price_x64_before,
-        //     sqrt_price_x64_after: state.sqrt_price_x64,
-        //     liquidity_before,
-        //     liquidity_after: state.liquidity,
-        //     zero_for_one,
-        // });
+        loop_count += 1;
     }
 
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
