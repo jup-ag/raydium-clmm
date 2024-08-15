@@ -26,7 +26,6 @@ pub fn compute_swap_step(
 ) -> Result<SwapStep> {
     // let exact_in = amount_remaining >= 0;
     let mut swap_step = SwapStep::default();
-    let mut sqrt_price_target_x64 = sqrt_price_target_x64;
     if is_base_input {
         // round up amount_in
         // In exact input case, amount_remaining is positive
@@ -37,45 +36,51 @@ pub fn compute_swap_step(
             )
             .ok_or(ErrorCode::CalculateOverflow)?;
 
-        (sqrt_price_target_x64, swap_step.amount_in) = calculate_target_price_and_amount(
+        let amount_in = calculate_amount_in_range(
             sqrt_price_current_x64,
             sqrt_price_target_x64,
             liquidity,
-            amount_remaining_less_fee,
             zero_for_one,
             is_base_input,
         )?;
-
-        swap_step.sqrt_price_next_x64 = if amount_remaining_less_fee >= swap_step.amount_in {
-            sqrt_price_target_x64
-        } else {
-            sqrt_price_math::get_next_sqrt_price_from_input(
-                sqrt_price_current_x64,
-                liquidity,
-                amount_remaining_less_fee,
-                zero_for_one,
-            )
-        };
-    } else {
-        (sqrt_price_target_x64, swap_step.amount_out) = calculate_target_price_and_amount(
-            sqrt_price_current_x64,
-            sqrt_price_target_x64,
-            liquidity,
-            amount_remaining,
-            zero_for_one,
-            is_base_input,
-        )?;
-        // In exact output case, amount_remaining is negative
-        swap_step.sqrt_price_next_x64 = if amount_remaining >= swap_step.amount_out {
-            sqrt_price_target_x64
-        } else {
-            sqrt_price_math::get_next_sqrt_price_from_output(
-                sqrt_price_current_x64,
-                liquidity,
-                amount_remaining,
-                zero_for_one,
-            )
+        if let Some(amount_in) = amount_in {
+            swap_step.amount_in = amount_in;
         }
+
+        swap_step.sqrt_price_next_x64 =
+            if amount_in.is_some() && amount_remaining_less_fee >= swap_step.amount_in {
+                sqrt_price_target_x64
+            } else {
+                sqrt_price_math::get_next_sqrt_price_from_input(
+                    sqrt_price_current_x64,
+                    liquidity,
+                    amount_remaining_less_fee,
+                    zero_for_one,
+                )
+            };
+    } else {
+        let amount_out = calculate_amount_in_range(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+            is_base_input,
+        )?;
+        if let Some(amount_out) = amount_out {
+            swap_step.amount_out = amount_out;
+        }
+        // In exact output case, amount_remaining is negative
+        swap_step.sqrt_price_next_x64 =
+            if amount_out.is_some() && amount_remaining >= swap_step.amount_out {
+                sqrt_price_target_x64
+            } else {
+                sqrt_price_math::get_next_sqrt_price_from_output(
+                    sqrt_price_current_x64,
+                    liquidity,
+                    amount_remaining,
+                    zero_for_one,
+                )
+            }
     }
 
     // whether we reached the max possible price for the given ticks
@@ -145,15 +150,13 @@ pub fn compute_swap_step(
     Ok(swap_step)
 }
 
-fn calculate_target_price_and_amount(
+fn calculate_amount_in_range(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,
     liquidity: u128,
-    amount_remaining: u64,
     zero_for_one: bool,
     is_base_input: bool,
-) -> Result<(u128, u64)> {
-    let sqrt_price_next_x64: u128;
+) -> Result<Option<u64>> {
     if is_base_input {
         let result = if zero_for_one {
             liquidity_math::get_delta_amount_0_unsigned(
@@ -171,19 +174,12 @@ fn calculate_target_price_and_amount(
             )
         };
 
-        if result.is_ok() {
-            return Ok((sqrt_price_target_x64, result.unwrap()));
+        if let Ok(result) = result {
+            return Ok(Some(result));
         } else {
-            if let Err(err) = result {
-                if err == crate::error::ErrorCode::MaxTokenOverflow.into() {
-                    sqrt_price_next_x64 = sqrt_price_math::get_next_sqrt_price_from_input(
-                        sqrt_price_current_x64,
-                        liquidity,
-                        amount_remaining,
-                        zero_for_one,
-                    );
-                    return Ok((sqrt_price_next_x64, amount_remaining));
-                }
+            let err = result.err().unwrap();
+            if err == crate::error::ErrorCode::MaxTokenOverflow.into() {
+                return Ok(None);
             }
             return Err(ErrorCode::SqrtPriceLimitOverflow.into());
         }
@@ -203,20 +199,14 @@ fn calculate_target_price_and_amount(
                 false,
             )
         };
-        if result.is_ok() {
-            return Ok((sqrt_price_target_x64, result.unwrap()));
+        if let Ok(result) = result {
+            return Ok(Some(result));
         } else {
-            if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
-                sqrt_price_next_x64 = sqrt_price_math::get_next_sqrt_price_from_output(
-                    sqrt_price_current_x64,
-                    liquidity,
-                    amount_remaining,
-                    zero_for_one,
-                );
-                return Ok((sqrt_price_next_x64, amount_remaining));
-            } else {
-                return Err(ErrorCode::SqrtPriceLimitOverflow.into());
+            let err = result.err().unwrap();
+            if err == crate::error::ErrorCode::MaxTokenOverflow.into() {
+                return Ok(None);
             }
+            return Err(ErrorCode::SqrtPriceLimitOverflow.into());
         }
     }
 }
