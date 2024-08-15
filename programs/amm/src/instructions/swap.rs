@@ -472,10 +472,14 @@ pub fn swap_on_swap_state(
                 .amount_specified_remaining
                 .checked_sub(step.amount_out)
                 .ok_or(ErrorCode::InvalidComputation)?;
+            let step_amount_calculate = step
+                .amount_in
+                .checked_add(step.fee_amount)
+                .ok_or(ErrorCode::CalculateOverflow)?;
             state.amount_calculated = state
                 .amount_calculated
-                .checked_add(step.amount_in + step.fee_amount)
-                .ok_or(ErrorCode::InvalidComputation)?;
+                .checked_add(step_amount_calculate)
+                .ok_or(ErrorCode::CalculateOverflow)?;
         }
 
         let step_fee_amount = step.fee_amount;
