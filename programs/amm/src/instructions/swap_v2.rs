@@ -1,3 +1,4 @@
+use std::cell::Ref;
 use std::collections::VecDeque;
 use std::ops::Deref;
 
@@ -126,28 +127,31 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             ErrorCode::InvalidInputPoolVault
         );
 
-        let mut tickarray_bitmap_extension = None;
+        let mut tickarray_bitmap_extension_loader: Option<AccountLoader<TickArrayBitmapExtension>> = None;
         let tick_array_states = &mut VecDeque::new();
 
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
         for account_info in remaining_accounts.into_iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
-                tickarray_bitmap_extension = Some(
-                    *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
-                        .load()?
-                        .deref()),
-                );
+                tickarray_bitmap_extension_loader = Some(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?);
                 continue;
             }
             tick_array_states.push_back(AccountLoad::load_data_mut(account_info)?);
         }
+
+        // After the loop, load the Ref
+        let tickarray_bitmap_extension = if let Some(ref loader) = tickarray_bitmap_extension_loader {
+            Some(loader.load()?)
+        } else {
+            None
+        };
 
         (amount_0, amount_1) = swap_internal(
             &ctx.amm_config,
             pool_state,
             tick_array_states,
             &mut ctx.observation_state.load_mut()?,
-            &tickarray_bitmap_extension,
+            tickarray_bitmap_extension.as_deref(),  // Pass as `Option<&TickArrayBitmapExtension>`
             amount_specified,
             if sqrt_price_limit_x64 == 0 {
                 if zero_for_one {
