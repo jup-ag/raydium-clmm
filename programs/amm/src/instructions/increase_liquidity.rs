@@ -291,7 +291,7 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         if use_tickarray_bitmap_extension {
             require_keys_eq!(
                 remaining_accounts[0].key(),
-                TickArrayBitmapExtension::key(pool_state_loader.key())
+                TickArrayBitmapExtension::key(pool_state_loader.key(), crate::id())
             );
             Some(&remaining_accounts[0])
         } else {

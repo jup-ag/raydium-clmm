@@ -44,9 +44,13 @@ impl TickArrayBitmapExtension {
         self.negative_tick_array_bitmap = [[0; 8]; EXTENSION_TICKARRAY_BITMAP_SIZE];
     }
 
-    pub fn key(pool_id: Pubkey) -> Pubkey {
+    pub fn key(pool_id: Pubkey, program_id: Pubkey) -> Pubkey {
         Pubkey::find_program_address(
-            &[POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(), pool_id.as_ref()],
+            &[
+                POOL_TICK_ARRAY_BITMAP_SEED.as_bytes(),
+                pool_id.as_ref(),
+                program_id.as_ref(),
+            ],
             &crate::id(),
         )
         .0
