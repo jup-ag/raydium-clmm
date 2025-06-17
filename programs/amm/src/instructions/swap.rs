@@ -602,7 +602,8 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         let tick_array_states = &mut VecDeque::new();
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
 
-        let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
+        let tick_array_bitmap_extension_key =
+            TickArrayBitmapExtension::key(pool_state.key(), crate::id());
         for account_info in remaining_accounts.into_iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(

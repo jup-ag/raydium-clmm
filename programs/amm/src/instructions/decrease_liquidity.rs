@@ -300,10 +300,10 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         ]);
 
         for account_info in remaining_accounts.into_iter() {
-            if account_info
-                .key()
-                .eq(&TickArrayBitmapExtension::key(pool_state.key()))
-            {
+            if account_info.key().eq(&TickArrayBitmapExtension::key(
+                pool_state.key(),
+                crate::id(),
+            )) {
                 tickarray_bitmap_extension = Some(account_info);
                 continue;
             }
