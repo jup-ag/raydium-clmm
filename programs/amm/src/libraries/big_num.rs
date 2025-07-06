@@ -132,13 +132,24 @@ macro_rules! construct_bignum {
 				arr[0] as usize
 			}
 
-			/// Whether this is zero.
+			/// Whether this is zero - optimized with manual unrolling
 			#[inline]
 			pub const fn is_zero(&self) -> bool {
 				let &$name(ref arr) = self;
 				let mut i = 0;
-				while i < $n_words { if arr[i] != 0 { return false; } else { i += 1; } }
-				return true;
+				
+				// Unroll loop for better performance
+				while i + 3 < $n_words {
+					if arr[i] != 0 || arr[i + 1] != 0 || arr[i + 2] != 0 || arr[i + 3] != 0 {
+						return false;
+					}
+					i += 4;
+				}
+				while i < $n_words {
+					if arr[i] != 0 { return false; }
+					i += 1;
+				}
+				true
 			}
 
             // Whether this fits u64.
@@ -225,8 +236,19 @@ macro_rules! construct_bignum {
                 let $name(ref arr1) = self;
                 let $name(ref arr2) = other;
                 let mut ret = [0u64; $n_words];
-                for i in 0..$n_words {
+                
+                // Manual loop unrolling for better performance
+                let mut i = 0;
+                while i + 3 < $n_words {
                     ret[i] = arr1[i] & arr2[i];
+                    ret[i + 1] = arr1[i + 1] & arr2[i + 1];
+                    ret[i + 2] = arr1[i + 2] & arr2[i + 2];
+                    ret[i + 3] = arr1[i + 3] & arr2[i + 3];
+                    i += 4;
+                }
+                while i < $n_words {
+                    ret[i] = arr1[i] & arr2[i];
+                    i += 1;
                 }
                 $name(ret)
             }
@@ -240,8 +262,19 @@ macro_rules! construct_bignum {
                 let $name(ref arr1) = self;
                 let $name(ref arr2) = other;
                 let mut ret = [0u64; $n_words];
-                for i in 0..$n_words {
+                
+                // Manual loop unrolling for better performance
+                let mut i = 0;
+                while i + 3 < $n_words {
                     ret[i] = arr1[i] | arr2[i];
+                    ret[i + 1] = arr1[i + 1] | arr2[i + 1];
+                    ret[i + 2] = arr1[i + 2] | arr2[i + 2];
+                    ret[i + 3] = arr1[i + 3] | arr2[i + 3];
+                    i += 4;
+                }
+                while i < $n_words {
+                    ret[i] = arr1[i] | arr2[i];
+                    i += 1;
                 }
                 $name(ret)
             }
@@ -255,8 +288,19 @@ macro_rules! construct_bignum {
                 let $name(ref arr1) = self;
                 let $name(ref arr2) = other;
                 let mut ret = [0u64; $n_words];
-                for i in 0..$n_words {
+                
+                // Manual loop unrolling for better performance
+                let mut i = 0;
+                while i + 3 < $n_words {
                     ret[i] = arr1[i] ^ arr2[i];
+                    ret[i + 1] = arr1[i + 1] ^ arr2[i + 1];
+                    ret[i + 2] = arr1[i + 2] ^ arr2[i + 2];
+                    ret[i + 3] = arr1[i + 3] ^ arr2[i + 3];
+                    i += 4;
+                }
+                while i < $n_words {
+                    ret[i] = arr1[i] ^ arr2[i];
+                    i += 1;
                 }
                 $name(ret)
             }

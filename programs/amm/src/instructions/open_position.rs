@@ -4,7 +4,6 @@ use crate::libraries::tick_math;
 use crate::states::*;
 use crate::util::*;
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::metadata::Metadata;
 use anchor_spl::token::{self, Token};
@@ -348,7 +347,7 @@ pub fn open_position_v1<'a, 'b, 'c: 'info, 'info>(
         None,
         None,
         None,
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         ctx.bumps.protocol_position,
         ctx.bumps.personal_position,
         liquidity,
@@ -398,7 +397,7 @@ pub fn open_position_v2<'a, 'b, 'c: 'info, 'info>(
         Some(ctx.accounts.token_program_2022.clone()),
         Some(ctx.accounts.vault_0_mint.clone()),
         Some(ctx.accounts.vault_1_mint.clone()),
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         ctx.bumps.protocol_position,
         ctx.bumps.personal_position,
         liquidity,
@@ -475,7 +474,7 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
             payer.to_account_info(),
             tick_array_lower_loader.to_account_info(),
             system_program.to_account_info(),
-            &pool_state_loader,
+            pool_state_loader,
             tick_array_lower_start_index,
             pool_state.tick_spacing,
         )?;
@@ -488,7 +487,7 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
                     payer.to_account_info(),
                     tick_array_upper_loader.to_account_info(),
                     system_program.to_account_info(),
-                    &pool_state_loader,
+                    pool_state_loader,
                     tick_array_upper_start_index,
                     pool_state.tick_spacing,
                 )?
@@ -567,9 +566,9 @@ pub fn open_position<'a, 'b, 'c: 'info, 'info>(
             pool_state: pool_state_loader.key(),
             minter: payer.key(),
             nft_owner: position_nft_owner.key(),
-            tick_lower_index: tick_lower_index,
-            tick_upper_index: tick_upper_index,
-            liquidity: liquidity,
+            tick_lower_index,
+            tick_upper_index,
+            liquidity,
             deposit_amount_0: amount_0,
             deposit_amount_1: amount_1,
             deposit_amount_0_transfer_fee: amount_0_transfer_fee,
@@ -775,7 +774,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         token_account_0,
         token_vault_0,
         vault_0_mint,
-        &token_program,
+        token_program,
         token_2022_program_opt.clone(),
         amount_0 + amount_0_transfer_fee,
     )?;
@@ -785,7 +784,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         token_account_1,
         token_vault_1,
         vault_1_mint,
-        &token_program,
+        token_program,
         token_2022_program_opt.clone(),
         amount_1 + amount_1_transfer_fee,
     )?;
@@ -794,7 +793,7 @@ pub fn add_liquidity<'b, 'c: 'info, 'info>(
         tick: pool_state.tick_current,
         tick_lower: tick_lower_index,
         tick_upper: tick_upper_index,
-        liquidity_before: liquidity_before,
+        liquidity_before,
         liquidity_after: pool_state.liquidity,
     });
     Ok((
@@ -1061,8 +1060,8 @@ mod modify_position_test {
         .unwrap();
         assert!(amount_0_int != 0);
         assert!(amount_1_int != 0);
-        assert_eq!(flip_tick_lower, true);
-        assert_eq!(flip_tick_upper, true);
+        assert!(flip_tick_lower);
+        assert!(flip_tick_upper);
 
         // check pool active liquidity
         let new_liquidity = pool_state.liquidity;
@@ -1128,8 +1127,8 @@ mod modify_position_test {
         .unwrap();
         assert!(amount_0_int == 0);
         assert!(amount_1_int != 0);
-        assert_eq!(flip_tick_lower, true);
-        assert_eq!(flip_tick_upper, true);
+        assert!(flip_tick_lower);
+        assert!(flip_tick_upper);
 
         // check pool active liquidity
         let new_liquidity = pool_state.liquidity;
@@ -1193,8 +1192,8 @@ mod modify_position_test {
         .unwrap();
         assert!(amount_0_int != 0);
         assert!(amount_1_int == 0);
-        assert_eq!(flip_tick_lower, true);
-        assert_eq!(flip_tick_upper, true);
+        assert!(flip_tick_lower);
+        assert!(flip_tick_upper);
 
         // check pool active liquidity
         let new_liquidity = pool_state.liquidity;

@@ -205,7 +205,7 @@ pub fn increase_liquidity_v1<'a, 'b, 'c: 'info, 'info>(
         None,
         None,
         None,
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_max,
         amount_1_max,
@@ -235,7 +235,7 @@ pub fn increase_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         Some(ctx.accounts.token_program_2022.clone()),
         Some(ctx.accounts.vault_0_mint.clone()),
         Some(ctx.accounts.vault_1_mint.clone()),
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_max,
         amount_1_max,
@@ -276,7 +276,7 @@ pub fn increase_liquidity<'a, 'b, 'c: 'info, 'info>(
         pool_state.is_overflow_default_tickarray_bitmap(vec![tick_lower, tick_upper]);
 
     let (amount_0, amount_1, amount_0_transfer_fee, amount_1_transfer_fee) = add_liquidity(
-        &nft_owner,
+        nft_owner,
         token_account_0,
         token_account_1,
         token_vault_0,

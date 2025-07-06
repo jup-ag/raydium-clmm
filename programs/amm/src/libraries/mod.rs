@@ -4,6 +4,7 @@ pub mod full_math;
 pub mod liquidity_math;
 pub mod sqrt_price_math;
 pub mod swap_math;
+pub mod simd_math_portable;
 
 pub mod tick_array_bit_map;
 pub mod tick_math;

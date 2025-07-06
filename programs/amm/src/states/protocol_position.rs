@@ -63,11 +63,11 @@ impl ProtocolPositionState {
         reward_growths_inside: [u128; REWARD_NUM],
     ) -> Result<()> {
         require!(
-            tick_lower_index >= tick_math::MIN_TICK && tick_lower_index <= tick_math::MAX_TICK,
+            (tick_math::MIN_TICK..=tick_math::MAX_TICK).contains(&tick_lower_index),
             ErrorCode::TickLowerOverflow
         );
         require!(
-            tick_upper_index >= tick_math::MIN_TICK && tick_upper_index <= tick_math::MAX_TICK,
+            (tick_math::MIN_TICK..=tick_math::MAX_TICK).contains(&tick_upper_index),
             ErrorCode::TickUpperOverflow
         );
         let liquidity_next = if liquidity_delta == 0 {

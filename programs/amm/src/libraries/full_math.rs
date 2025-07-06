@@ -126,8 +126,15 @@ impl Downcast512 for U512 {
 impl MulDiv for u64 {
     type Output = u64;
 
+    #[inline]
     fn mul_div_floor(self, num: Self, denom: Self) -> Option<Self::Output> {
-        assert_ne!(denom, 0);
+        debug_assert_ne!(denom, 0);
+        
+        // Fast path for small numbers that won't overflow
+        if self <= u32::MAX as u64 && num <= u32::MAX as u64 {
+            return Some((self * num) / denom);
+        }
+        
         let r = (U128::from(self) * U128::from(num)) / U128::from(denom);
         if r > U128::from(u64::MAX) {
             None
@@ -136,8 +143,16 @@ impl MulDiv for u64 {
         }
     }
 
+    #[inline] 
     fn mul_div_ceil(self, num: Self, denom: Self) -> Option<Self::Output> {
-        assert_ne!(denom, 0);
+        debug_assert_ne!(denom, 0);
+        
+        // Fast path for small numbers
+        if self <= u32::MAX as u64 && num <= u32::MAX as u64 {
+            let product = self * num;
+            return Some(product.div_ceil(denom));
+        }
+        
         let r = (U128::from(self) * U128::from(num) + U128::from(denom - 1)) / U128::from(denom);
         if r > U128::from(u64::MAX) {
             None
@@ -146,6 +161,7 @@ impl MulDiv for u64 {
         }
     }
 
+    #[inline]
     fn to_underflow_u64(self) -> u64 {
         self
     }
@@ -154,8 +170,19 @@ impl MulDiv for u64 {
 impl MulDiv for U128 {
     type Output = U128;
 
+    #[inline]
     fn mul_div_floor(self, num: Self, denom: Self) -> Option<Self::Output> {
-        assert_ne!(denom, U128::default());
+        debug_assert_ne!(denom, U128::default());
+        
+        // Fast path for smaller numbers to avoid U256 overhead
+        if self.0[1] == 0 && num.0[1] == 0 && denom.0[1] == 0 {
+            // All values fit in u64, use faster u128 arithmetic
+            let result = (self.0[0] as u128 * num.0[0] as u128) / denom.0[0] as u128;
+            if result <= u64::MAX as u128 {
+                return Some(U128([result as u64, 0]));
+            }
+        }
+        
         let r = ((self.as_u256()) * (num.as_u256())) / (denom.as_u256());
         if r > U128::MAX.as_u256() {
             None
@@ -164,8 +191,19 @@ impl MulDiv for U128 {
         }
     }
 
+    #[inline]
     fn mul_div_ceil(self, num: Self, denom: Self) -> Option<Self::Output> {
-        assert_ne!(denom, U128::default());
+        debug_assert_ne!(denom, U128::default());
+        
+        // Fast path for smaller numbers
+        if self.0[1] == 0 && num.0[1] == 0 && denom.0[1] == 0 {
+            let product = self.0[0] as u128 * num.0[0] as u128;
+            let result = product.div_ceil(denom.0[0] as u128);
+            if result <= u64::MAX as u128 {
+                return Some(U128([result as u64, 0]));
+            }
+        }
+        
         let r = (self.as_u256() * num.as_u256() + (denom - 1).as_u256()) / denom.as_u256();
         if r > U128::MAX.as_u256() {
             None
@@ -174,6 +212,7 @@ impl MulDiv for U128 {
         }
     }
 
+    #[inline]
     fn to_underflow_u64(self) -> u64 {
         if self < U128::from(u64::MAX) {
             self.as_u64()

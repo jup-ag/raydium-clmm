@@ -11,7 +11,7 @@ use std::cell::RefMut;
 use std::ops::DerefMut;
 
 /// Memo msg for decrease liquidity
-pub const DECREASE_MEMO_MSG: &'static [u8] = b"raydium_decrease";
+pub const DECREASE_MEMO_MSG: &[u8] = b"raydium_decrease";
 #[derive(Accounts)]
 pub struct DecreaseLiquidity<'info> {
     /// The position owner or delegated authority
@@ -216,7 +216,7 @@ pub fn decrease_liquidity_v1<'a, 'b, 'c: 'info, 'info>(
         None,
         None,
         None,
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_min,
         amount_1_min,
@@ -244,7 +244,7 @@ pub fn decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         Some(ctx.accounts.memo_program.clone()),
         Some(ctx.accounts.vault_0_mint.clone()),
         Some(ctx.accounts.vault_1_mint.clone()),
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_min,
         amount_1_min,
@@ -299,7 +299,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             tick_array_upper_loader.load()?.start_tick_index,
         ]);
 
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info
                 .key()
                 .eq(&TickArrayBitmapExtension::key(pool_state.key()))
@@ -340,7 +340,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     }
     emit!(LiquidityCalculateEvent {
         pool_liquidity: liquidity_before,
-        pool_sqrt_price_x64: pool_sqrt_price_x64,
+        pool_sqrt_price_x64,
         pool_tick: pool_tick_current,
         calc_amount_0: decrease_amount_0,
         calc_amount_1: decrease_amount_1,
@@ -411,22 +411,18 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         token_program,
         token_2022_program_opt.clone(),
         personal_position,
-        if token_2022_program_opt.is_none() {
-            false
-        } else {
-            true
-        },
+        token_2022_program_opt.is_some(),
     )?;
     emit!(DecreaseLiquidityEvent {
         position_nft_mint: personal_position.nft_mint,
         liquidity,
-        decrease_amount_0: decrease_amount_0,
-        decrease_amount_1: decrease_amount_1,
+        decrease_amount_0,
+        decrease_amount_1,
         fee_amount_0: latest_fees_owed_0,
         fee_amount_1: latest_fees_owed_1,
         reward_amounts,
-        transfer_fee_0: transfer_fee_0,
-        transfer_fee_1: transfer_fee_1,
+        transfer_fee_0,
+        transfer_fee_1,
     });
 
     Ok(())
@@ -580,17 +576,17 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         tick: pool_state.tick_current,
         tick_lower: protocol_position.tick_lower_index,
         tick_upper: protocol_position.tick_upper_index,
-        liquidity_before: liquidity_before,
+        liquidity_before,
         liquidity_after: pool_state.liquidity,
     });
 
     Ok((amount_0, amount_1))
 }
 
-pub fn collect_rewards<'a, 'b, 'c, 'info>(
+pub fn collect_rewards<'a, 'c, 'info>(
     pool_state_loader: &AccountLoader<'info, PoolState>,
     remaining_accounts: &[&'info AccountInfo<'info>],
-    token_program: &'b Program<'info, Token>,
+    token_program: &Program<'info, Token>,
     token_program_2022: Option<AccountInfo<'info>>,
     personal_position_state: &mut PersonalPositionState,
     need_reward_mint: bool,
@@ -604,7 +600,7 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
     }
     let mut reward_group_account_num = 3;
     if !need_reward_mint {
-        reward_group_account_num = reward_group_account_num - 1
+        reward_group_account_num -= 1
     }
     check_required_accounts_length(
         pool_state_loader,
@@ -660,11 +656,11 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
                 .add_reward_clamed(i, transfer_amount)?;
 
             transfer_from_pool_vault_to_user(
-                &pool_state_loader,
+                pool_state_loader,
                 &reward_token_vault,
                 &recipient_token_account,
                 reward_vault_mint,
-                &token_program,
+                token_program,
                 token_program_2022.clone(),
                 transfer_amount,
             )?;
@@ -684,7 +680,7 @@ fn check_required_accounts_length(
     let mut valid_reward_count = 0;
     for item in pool_state.reward_infos {
         if item.initialized() {
-            valid_reward_count = valid_reward_count + 1;
+            valid_reward_count += 1;
         }
     }
     let remaining_accounts_len = remaining_accounts.len();

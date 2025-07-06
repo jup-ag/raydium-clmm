@@ -157,76 +157,150 @@ pub fn get_liquidity_from_single_amount_1(
     })
 }
 
-/// Gets the delta amount_0 for given liquidity and price range
-///
-/// # Formula
-///
-/// * `Δx = L * (1 / √P_lower - 1 / √P_upper)`
-/// * i.e. `L * (√P_upper - √P_lower) / (√P_upper * √P_lower)`
+/// Optimized delta amount_0 calculation
+/// Formula: Δx = L * (√P_upper - √P_lower) / (√P_upper * √P_lower)
+#[inline]
 pub fn get_delta_amount_0_unsigned(
     mut sqrt_ratio_a_x64: u128,
     mut sqrt_ratio_b_x64: u128,
     liquidity: u128,
     round_up: bool,
 ) -> Result<u64> {
-    // sqrt_ratio_a_x64 should hold the smaller value
+    // Ensure sqrt_ratio_a_x64 is smaller
     if sqrt_ratio_a_x64 > sqrt_ratio_b_x64 {
         std::mem::swap(&mut sqrt_ratio_a_x64, &mut sqrt_ratio_b_x64);
-    };
+    }
 
+    // Early return for zero case
+    if sqrt_ratio_a_x64 == 0 || liquidity == 0 {
+        return Ok(0);
+    }
+
+    // Ultra-fast path for very small values (nanosecond performance)
+    if liquidity <= 65536 && sqrt_ratio_a_x64 <= 1000000 && sqrt_ratio_b_x64 <= 1000000 {
+        let price_diff = sqrt_ratio_b_x64 - sqrt_ratio_a_x64;
+        
+        // Use checked arithmetic even in fast path to prevent overflow
+        if let Some(numerator) = liquidity.checked_shl(64) {
+            if let Some(denominator) = sqrt_ratio_a_x64.checked_mul(sqrt_ratio_b_x64) {
+                if denominator > 0 {
+                    if let Some(product) = numerator.checked_mul(price_diff) {
+                        let result = product / denominator;
+                        if result <= u64::MAX as u128 {
+                            return Ok(result as u64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fast path for larger values that fit in u128 arithmetic
+    if liquidity <= u64::MAX as u128 && 
+       sqrt_ratio_a_x64 <= u64::MAX as u128 && 
+       sqrt_ratio_b_x64 <= u64::MAX as u128 {
+        
+        let price_diff = sqrt_ratio_b_x64 - sqrt_ratio_a_x64;
+        
+        // Check for overflow in the numerator calculation
+        if let Some(numerator) = liquidity.checked_shl(64) {
+            // Check for overflow in the multiplication
+            if let Some(num_times_diff) = numerator.checked_mul(price_diff) {
+                if let Some(denominator) = sqrt_ratio_a_x64.checked_mul(sqrt_ratio_b_x64) {
+                    if denominator > 0 {
+                        let result = if round_up {
+                            num_times_diff.div_ceil(denominator)
+                        } else {
+                            num_times_diff / denominator
+                        };
+                        
+                        if result <= u64::MAX as u128 {
+                            return Ok(result as u64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to U256 arithmetic for larger values
     let numerator_1 = U256::from(liquidity) << fixed_point_64::RESOLUTION;
     let numerator_2 = U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64);
-
-    assert!(sqrt_ratio_a_x64 > 0);
+    let denominator = U256::from(sqrt_ratio_a_x64) * U256::from(sqrt_ratio_b_x64);
 
     let result = if round_up {
-        U256::div_rounding_up(
-            numerator_1
-                .mul_div_ceil(numerator_2, U256::from(sqrt_ratio_b_x64))
-                .ok_or(ErrorCode::CalculateOverflow)?,
-            U256::from(sqrt_ratio_a_x64),
-        )
+        U256::div_rounding_up(numerator_1 * numerator_2, denominator)
     } else {
-        numerator_1
-            .mul_div_floor(numerator_2, U256::from(sqrt_ratio_b_x64))
-            .ok_or(ErrorCode::CalculateOverflow)?
-            / U256::from(sqrt_ratio_a_x64)
+        (numerator_1 * numerator_2) / denominator
     };
+
     if result > U256::from(u64::MAX) {
         return Err(ErrorCode::MaxTokenOverflow.into());
     }
-    return Ok(result.as_u64());
+    Ok(result.as_u64())
 }
 
-/// Gets the delta amount_1 for given liquidity and price range
-/// * `Δy = L (√P_upper - √P_lower)`
+/// Optimized delta amount_1 calculation  
+/// Formula: Δy = L * (√P_upper - √P_lower)
+#[inline]
 pub fn get_delta_amount_1_unsigned(
     mut sqrt_ratio_a_x64: u128,
     mut sqrt_ratio_b_x64: u128,
     liquidity: u128,
     round_up: bool,
 ) -> Result<u64> {
-    // sqrt_ratio_a_x64 should hold the smaller value
+    // Ensure sqrt_ratio_a_x64 is smaller
     if sqrt_ratio_a_x64 > sqrt_ratio_b_x64 {
         std::mem::swap(&mut sqrt_ratio_a_x64, &mut sqrt_ratio_b_x64);
-    };
+    }
 
+    // Early return for zero case
+    if liquidity == 0 || sqrt_ratio_a_x64 == sqrt_ratio_b_x64 {
+        return Ok(0);
+    }
+
+    let price_diff = sqrt_ratio_b_x64 - sqrt_ratio_a_x64;
+    
+    // Ultra-fast path for small values (nanosecond performance)
+    if liquidity <= u64::MAX as u128 && price_diff <= u64::MAX as u128 {
+        // Use checked arithmetic to prevent overflow
+        if let Some(product) = liquidity.checked_mul(price_diff) {
+            let result = if round_up {
+                // For ceiling division: (a + b - 1) / b becomes (a + b - 1) >> log2(b)
+                if let Some(sum) = product.checked_add((1u128 << 64) - 1) {
+                    sum >> 64
+                } else {
+                    // Fallback to U256 if overflow
+                    u64::MAX as u128 + 1 // This will trigger the fallback below
+                }
+            } else {
+                product >> 64  // Direct bit shift instead of division
+            };
+            
+            if result <= u64::MAX as u128 {
+                return Ok(result as u64);
+            }
+        }
+    }
+    
+    // Fallback to U256 arithmetic for larger values
     let result = if round_up {
         U256::from(liquidity).mul_div_ceil(
-            U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64),
+            U256::from(price_diff),
             U256::from(fixed_point_64::Q64),
         )
     } else {
         U256::from(liquidity).mul_div_floor(
-            U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64),
+            U256::from(price_diff),
             U256::from(fixed_point_64::Q64),
         )
     }
     .ok_or(ErrorCode::CalculateOverflow)?;
+
     if result > U256::from(u64::MAX) {
         return Err(ErrorCode::MaxTokenOverflow.into());
     }
-    return Ok(result.as_u64());
+    Ok(result.as_u64())
 }
 
 /// Helper function to get signed delta amount_0 for given liquidity and price range

@@ -11,7 +11,7 @@ use anchor_spl::token::Token;
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 
 /// Memo msg for swap
-pub const SWAP_MEMO_MSG: &'static [u8] = b"raydium_swap";
+pub const SWAP_MEMO_MSG: &[u8] = b"raydium_swap";
 #[derive(Accounts)]
 pub struct SwapSingleV2<'info> {
     /// The user performing the swap
@@ -130,7 +130,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         let tick_array_states = &mut VecDeque::new();
 
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(
                     *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
@@ -313,12 +313,10 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             } else {
                 require_eq!(amount_specified, transfer_amount_1);
             }
+        } else if zero_for_one {
+            require_eq!(amount_specified, transfer_amount_1);
         } else {
-            if zero_for_one {
-                require_eq!(amount_specified, transfer_amount_1);
-            } else {
-                require_eq!(amount_specified, transfer_amount_0);
-            }
+            require_eq!(amount_specified, transfer_amount_0);
         }
     }
 

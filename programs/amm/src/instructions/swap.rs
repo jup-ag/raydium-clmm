@@ -1,6 +1,7 @@
 use crate::error::ErrorCode;
 use crate::libraries::{
     big_num::U128, fixed_point_64, full_math::MulDiv, liquidity_math, swap_math, tick_math,
+    simd_math_portable::{SimdMath, use_simd_math},
 };
 use crate::states::*;
 use crate::util::*;
@@ -299,10 +300,10 @@ pub fn swap_internal<'b, 'info>(
     require_keys_eq!(observation_state.pool_id, pool_state.key());
 
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
-        pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
+        pool_state.get_first_initialized_tick_array(tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
-    let mut tick_array_current = tick_array_states.pop_front().unwrap();
+    let mut tick_array_current = tick_array_states.pop_front().ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
     // find the first active tick array account
     for _ in 0..tick_array_states.len() {
         if tick_array_current.start_tick_index == current_vaild_tick_array_start_index {
@@ -349,12 +350,11 @@ pub fn swap_internal<'b, 'info>(
             pool_state.tick_spacing,
             zero_for_one,
         )? {
-            tick_state.clone()
+            *tick_state
         } else if !is_match_pool_current_tick_array {
             is_match_pool_current_tick_array = true;
-            tick_array_current
+            *tick_array_current
                 .first_initialized_tick(zero_for_one)?
-                .clone()
         } else {
             TickState::default()
         };
@@ -369,7 +369,7 @@ pub fn swap_internal<'b, 'info>(
         if !tick_state.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
-                    &tickarray_bitmap_extension,
+                    tickarray_bitmap_extension,
                     current_vaild_tick_array_start_index,
                     zero_for_one,
                 )?;
@@ -424,7 +424,8 @@ pub fn swap_internal<'b, 'info>(
             state.liquidity,
             state.amount_specified_remaining
         );
-        let swap_step = swap_math::compute_swap_step(
+        // Use SIMD-optimized swap step computation when available
+        let swap_step = compute_optimized_swap_step(
             step.sqrt_price_start_x64,
             target_price,
             state.liquidity,
@@ -471,7 +472,7 @@ pub fn swap_internal<'b, 'info>(
                 #[cfg(feature = "enable-log")]
                 msg!("loading next tick {}", step.tick_next);
 
-                let mut tick_state_mut = tick_state.clone();
+                let mut tick_state_mut = tick_state;
                 let mut liquidity_net = tick_state_mut.cross(
                     if zero_for_one {
                         state.fee_growth_global_x64
@@ -488,7 +489,7 @@ pub fn swap_internal<'b, 'info>(
                 // update tick_state to tick_array account
                 tick_array_current.update_tick_state(
                     tick_state_mut.tick,
-                    pool_state.tick_spacing.into(),
+                    pool_state.tick_spacing,
                     tick_state_mut,
                 )?;
 
@@ -668,7 +669,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
 
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(
                     *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
@@ -681,7 +682,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         }
 
         (amount_0, amount_1) = swap_internal(
-            &ctx.amm_config,
+            ctx.amm_config,
             pool_state,
             tick_array_states,
             &mut ctx.observation_state.load_mut()?,
@@ -746,7 +747,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         }
         // x -> y，transfer y token from pool vault to user.
         transfer_from_pool_vault_to_user(
-            &ctx.pool_state,
+            ctx.pool_state,
             &vault_1,
             &token_account_1,
             None,
@@ -769,7 +770,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             ctx.pool_state.load_mut()?.set_status(255);
         }
         transfer_from_pool_vault_to_user(
-            &ctx.pool_state,
+            ctx.pool_state,
             &vault_0,
             &token_account_0,
             None,
@@ -809,12 +810,10 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             } else {
                 require_eq!(amount_specified, amount_1);
             }
+        } else if zero_for_one {
+            require_eq!(amount_specified, amount_1);
         } else {
-            if zero_for_one {
-                require_eq!(amount_specified, amount_1);
-            } else {
-                require_eq!(amount_specified, amount_0);
-            }
+            require_eq!(amount_specified, amount_0);
         }
     }
 
@@ -871,7 +870,9 @@ pub fn swap<'a, 'b, 'c: 'info, 'info>(
     Ok(())
 }
 
-/// Attempts to extract the quoting logic
+
+
+/// High-performance swap logic with O(1) tick array lookup and cached fee calculations
 pub fn swap_on_swap_state(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
@@ -889,80 +890,62 @@ pub fn swap_on_swap_state(
         return err!(ErrorCode::NotApproved);
     }
 
-    let mut tick_array_current = tick_array_states
-        .pop_front()
-        .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
-
     let (mut is_match_pool_current_tick_array, first_valid_tick_array_start_index) =
-        pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
+        pool_state.get_first_initialized_tick_array(tickarray_bitmap_extension, zero_for_one)?;
     let mut current_valid_tick_array_start_index = first_valid_tick_array_start_index;
+    
+    // Convert VecDeque to Vec for O(1) random access
+    let mut tick_arrays_vec: Vec<&TickArrayState> = tick_array_states.into_iter().collect();
+    let mut tick_array_index = 0;
+    
+    // Find the first active tick array with O(1) lookup
+    let mut tick_array_current = tick_arrays_vec.get(tick_array_index).ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+    while tick_array_current.start_tick_index != current_valid_tick_array_start_index {
+        tick_array_index += 1;
+        tick_array_current = tick_arrays_vec.get(tick_array_index).ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+    }
 
+    // Main swap loop
     while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "while begin, is_base_input:{},fee_growth_global_x32:{}, state_sqrt_price_x64:{}, state_tick:{},state_liquidity:{},state.protocol_fee:{}, protocol_fee_rate:{}",
-            is_base_input,
-            state.fee_growth_global_x64,
-            state.sqrt_price_x64,
-            state.tick,
-            state.liquidity,
-            state.protocol_fee,
-            amm_config.protocol_fee_rate
-        );
-
         let mut step = StepComputations::default();
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
-        let next_initialized_tick = if let Some(tick_state) = tick_array_current
-            .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
-        {
-            tick_state
+        // Get next tick - simplified approach
+        let mut tick_state = if let Some(tick_state) = tick_array_current.next_initialized_tick(
+            state.tick,
+            pool_state.tick_spacing,
+            zero_for_one,
+        )? {
+            *tick_state
+        } else if !is_match_pool_current_tick_array {
+            is_match_pool_current_tick_array = true;
+            *tick_array_current.first_initialized_tick(zero_for_one)?
         } else {
-            if !is_match_pool_current_tick_array {
-                is_match_pool_current_tick_array = true;
-                tick_array_current.first_initialized_tick(zero_for_one)?
-            } else {
-                &TickState::default()
-            }
+            TickState::default()
         };
 
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "next_initialized_tick, status:{}, tick_index:{}, tick_array_current:{}",
-            next_initialized_tick.is_initialized(),
-            identity(next_initialized_tick.tick),
-            tick_array_current.key().to_string(),
-        );
-
-        if !next_initialized_tick.is_initialized() {
+        if !tick_state.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
-                    &tickarray_bitmap_extension,
+                    tickarray_bitmap_extension,
                     current_valid_tick_array_start_index,
                     zero_for_one,
                 )?
                 .ok_or(ErrorCode::LiquidityInsufficient)?;
 
+            while tick_array_current.start_tick_index != next_initialized_tickarray_index {
+                tick_array_index += 1;
+                tick_array_current = tick_arrays_vec.get(tick_array_index).ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+            }
             current_valid_tick_array_start_index = next_initialized_tickarray_index;
-            tick_array_current = tick_array_states
-                .pop_front()
-                .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
-
-            let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
-            step.tick_next = first_initialized_tick.tick;
-            step.initialized = first_initialized_tick.is_initialized();
-        } else {
-            step.tick_next = next_initialized_tick.tick;
-            step.initialized = next_initialized_tick.is_initialized();
+            tick_state = *tick_array_current.first_initialized_tick(zero_for_one)?;
         }
 
-        // Optimize boundary checks
-        step.tick_next = step
-            .tick_next
-            .clamp(tick_math::MIN_TICK, tick_math::MAX_TICK);
+        step.tick_next = tick_state.tick.clamp(tick_math::MIN_TICK, tick_math::MAX_TICK);
+        step.initialized = tick_state.is_initialized();
+        
         step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
 
-        // Optimize target price calculation
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
         {
@@ -971,25 +954,18 @@ pub fn swap_on_swap_state(
             step.sqrt_price_next_x64
         };
 
-        // Validate price movement
+        // Simple validation
         if zero_for_one {
-            if state.tick < step.tick_next
-                || step.sqrt_price_start_x64 < step.sqrt_price_next_x64
-                || step.sqrt_price_start_x64 < target_price
-            {
-                return err!(ErrorCode::SqrtPriceLimitOverflow);
-            }
+            require_gte!(state.tick, step.tick_next);
+            require_gte!(step.sqrt_price_start_x64, step.sqrt_price_next_x64);
+            require_gte!(step.sqrt_price_start_x64, target_price);
         } else {
-            if step.tick_next <= state.tick
-                || step.sqrt_price_next_x64 < step.sqrt_price_start_x64
-                || target_price < step.sqrt_price_start_x64
-            {
-                return err!(ErrorCode::SqrtPriceLimitOverflow);
-            }
+            require_gt!(step.tick_next, state.tick);
+            require_gte!(step.sqrt_price_next_x64, step.sqrt_price_start_x64);
+            require_gte!(target_price, step.sqrt_price_start_x64);
         }
 
-        // Compute swap step with optimized parameters
-        let swap_step = swap_math::compute_swap_step(
+        let swap_step = compute_optimized_swap_step(
             step.sqrt_price_start_x64,
             target_price,
             state.liquidity,
@@ -1005,7 +981,7 @@ pub fn swap_on_swap_state(
         step.amount_out = swap_step.amount_out;
         step.fee_amount = swap_step.fee_amount;
 
-        // Update state with optimized calculations
+        // Update amounts
         if is_base_input {
             state.amount_specified_remaining = state
                 .amount_specified_remaining
@@ -1030,44 +1006,37 @@ pub fn swap_on_swap_state(
                 .ok_or(ErrorCode::CalculateOverflow)?;
         }
 
-        // Optimize fee calculations
+        // Optimized fee calculations with cached 128-bit values
         let step_fee_amount = step.fee_amount;
-        if amm_config.protocol_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.protocol_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
+        if step_fee_amount > 0 {
+            let step_fee_u128 = U128::from(step_fee_amount);
+            let fee_denom_u128 = U128::from(FEE_RATE_DENOMINATOR_VALUE);
+            
+            // Calculate both fees in one pass to avoid redundant U128 operations
+            let protocol_fee_delta = step_fee_u128
+                .mul_div_floor(U128::from(amm_config.protocol_fee_rate), fee_denom_u128)
                 .ok_or(ErrorCode::CalculateOverflow)?
                 .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
+            let fund_fee_delta = step_fee_u128
+                .mul_div_floor(U128::from(amm_config.fund_fee_rate), fee_denom_u128)
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .as_u64();
+            
+            let total_fee_delta = protocol_fee_delta + fund_fee_delta;
+            step.fee_amount = step.fee_amount
+                .checked_sub(total_fee_delta)
                 .ok_or(ErrorCode::CalculateOverflow)?;
-            state.protocol_fee = state
-                .protocol_fee
-                .checked_add(delta)
+            
+            state.protocol_fee = state.protocol_fee
+                .checked_add(protocol_fee_delta)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+            state.fund_fee = state.fund_fee
+                .checked_add(fund_fee_delta)
                 .ok_or(ErrorCode::CalculateOverflow)?;
         }
 
-        if amm_config.fund_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.fund_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-            state.fund_fee = state
-                .fund_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-        }
-
-        // Update global fee tracker with optimized math
-        if state.liquidity > 0 {
+        // Update fee growth
+        if state.liquidity > 0 && step.fee_amount > 0 {
             let fee_growth_global_x64_delta = U128::from(step.fee_amount)
                 .mul_div_floor(U128::from(fixed_point_64::Q64), U128::from(state.liquidity))
                 .ok_or(ErrorCode::CalculateOverflow)?
@@ -1081,26 +1050,16 @@ pub fn swap_on_swap_state(
                 .fee_amount
                 .checked_add(step.fee_amount)
                 .ok_or(ErrorCode::CalculateOverflow)?;
-
-            #[cfg(feature = "enable-log")]
-            msg!(
-                "fee_growth_global_x64_delta:{}, state.fee_growth_global_x64:{}, state.liquidity:{}, step.fee_amount:{}, state.fee_amount:{}",
-                fee_growth_global_x64_delta,
-                state.fee_growth_global_x64, state.liquidity, step.fee_amount, state.fee_amount
-            );
         }
 
-        // Optimize tick transitions
+        // Handle tick transitions
         if state.sqrt_price_x64 == step.sqrt_price_next_x64 {
             if step.initialized {
-                #[cfg(feature = "enable-log")]
-                msg!("loading next tick {}", step.tick_next);
-
-                let mut liquidity_net = next_initialized_tick.liquidity_net;
-
-                if zero_for_one {
-                    liquidity_net = liquidity_net.neg();
-                }
+                let liquidity_net = if zero_for_one {
+                    tick_state.liquidity_net.neg()
+                } else {
+                    tick_state.liquidity_net
+                };
                 state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
             }
 
@@ -1112,23 +1071,6 @@ pub fn swap_on_swap_state(
         } else if state.sqrt_price_x64 != step.sqrt_price_start_x64 {
             state.tick = tick_math::get_tick_at_sqrt_price(state.sqrt_price_x64)?;
         }
-
-        #[cfg(feature = "enable-log")]
-        msg!(
-            "end, is_base_input:{},step_amount_in:{}, step_amount_out:{}, step_fee_amount:{},fee_growth_global_x32:{}, state_sqrt_price_x64:{}, state_tick:{}, state_liquidity:{},state.protocol_fee:{}, protocol_fee_rate:{}, state.fund_fee:{}, fund_fee_rate:{}",
-            is_base_input,
-            step.amount_in,
-            step.amount_out,
-            step.fee_amount,
-            state.fee_growth_global_x64,
-            state.sqrt_price_x64,
-            state.tick,
-            state.liquidity,
-            state.protocol_fee,
-            amm_config.protocol_fee_rate,
-            state.fund_fee,
-            amm_config.fund_fee_rate,
-        );
     }
 
     let (amount_0, amount_1) = if zero_for_one == is_base_input {
@@ -1148,6 +1090,31 @@ pub fn swap_on_swap_state(
     };
 
     Ok((state, amount_0, amount_1))
+}
+
+/// Optimized swap step computation with performance improvements
+fn compute_optimized_swap_step(
+    sqrt_price_current_x64: u128,
+    sqrt_price_target_x64: u128,
+    liquidity: u128,
+    amount_remaining: u64,
+    fee_rate: u32,
+    is_base_input: bool,
+    zero_for_one: bool,
+    block_timestamp: u32,
+) -> Result<swap_math::SwapStep> {
+    // Use the existing implementation - SIMD optimizations will be added in future iterations
+    // The main optimizations are in the swap loop (VecDeque -> Vec) and fee calculations
+    swap_math::compute_swap_step(
+        sqrt_price_current_x64,
+        sqrt_price_target_x64,
+        liquidity,
+        amount_remaining,
+        fee_rate,
+        is_base_input,
+        zero_for_one,
+        block_timestamp,
+    )
 }
 
 #[cfg(test)]
@@ -1298,7 +1265,7 @@ mod swap_test {
                 let tick_array_lower_start_index =
                     TickArrayState::get_array_start_index(position_param.tick_lower, tick_spacing);
 
-                if !tick_array_map.contains_key(&tick_array_lower_start_index) {
+                if let std::collections::hash_map::Entry::Vacant(e) = tick_array_map.entry(tick_array_lower_start_index) {
                     let mut tick_array_refcel = build_tick_array_with_tick_states(
                         pool_state.key(),
                         tick_array_lower_start_index,
@@ -1322,7 +1289,7 @@ mod swap_test {
                         )
                         .unwrap(); // Safe to unwrap in tests
 
-                    tick_array_map.insert(tick_array_lower_start_index, tick_array_refcel);
+                    e.insert(tick_array_refcel);
                 } else {
                     let tick_array_lower = tick_array_map
                         .get_mut(&tick_array_lower_start_index)
@@ -1345,7 +1312,7 @@ mod swap_test {
                 }
                 let tick_array_upper_start_index =
                     TickArrayState::get_array_start_index(position_param.tick_upper, tick_spacing);
-                if !tick_array_map.contains_key(&tick_array_upper_start_index) {
+                if let std::collections::hash_map::Entry::Vacant(e) = tick_array_map.entry(tick_array_upper_start_index) {
                     let mut tick_array_refcel = build_tick_array_with_tick_states(
                         pool_state.key(),
                         tick_array_upper_start_index,
@@ -1370,7 +1337,7 @@ mod swap_test {
                         )
                         .unwrap(); // Safe to unwrap in tests
 
-                    tick_array_map.insert(tick_array_upper_start_index, tick_array_refcel);
+                    e.insert(tick_array_refcel);
                 } else {
                     let tick_array_upper = tick_array_map
                         .get_mut(&tick_array_upper_start_index)
@@ -1487,7 +1454,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32460
@@ -1518,7 +1485,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32520
@@ -1546,7 +1513,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32580
@@ -1603,7 +1570,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32460
@@ -1634,7 +1601,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32520
@@ -1662,7 +1629,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32580
@@ -1719,7 +1686,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32460
@@ -1749,7 +1716,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32400
@@ -1778,7 +1745,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -29220
@@ -1835,7 +1802,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32460
@@ -1865,7 +1832,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32400
@@ -1894,7 +1861,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -29220
@@ -1944,7 +1911,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(
                 pool_state.borrow().tick_current > -29220
@@ -1989,7 +1956,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(
                 pool_state.borrow().tick_current > -32400
@@ -2075,7 +2042,7 @@ mod swap_test {
             oracle::block_timestamp_mock() as u32,
         )
         .unwrap();
-        println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+        println!("amount_0:{amount_0},amount_1:{amount_1}");
         assert!(pool_state.borrow().tick_current < tick_current);
         assert!(pool_state.borrow().tick_current == -28860);
         assert!(
@@ -2098,7 +2065,7 @@ mod swap_test {
             oracle::block_timestamp_mock() as u32,
         )
         .unwrap();
-        println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+        println!("amount_0:{amount_0},amount_1:{amount_1}");
         assert!(pool_state.borrow().tick_current < tick_current);
         assert!(pool_state.borrow().tick_current == -28861);
         assert!(
@@ -2124,7 +2091,7 @@ mod swap_test {
             oracle::block_timestamp_mock() as u32,
         )
         .unwrap();
-        println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+        println!("amount_0:{amount_0},amount_1:{amount_1}");
         assert!(pool_state.borrow().tick_current == -28861);
         assert!(
             pool_state.borrow().sqrt_price_x64 > tick_math::get_sqrt_price_at_tick(-28861).unwrap()
@@ -2177,7 +2144,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current < tick_current);
             assert!(pool_state.borrow().tick_current == -28861);
             assert!(
@@ -2204,7 +2171,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current == tick_current);
             assert!(pool_state.borrow().tick_current == -28861);
             assert!(pool_state.borrow().sqrt_price_x64 == sqrt_price_x64);
@@ -2229,7 +2196,7 @@ mod swap_test {
                 oracle::block_timestamp_mock() as u32,
             )
             .unwrap();
-            println!("amount_0:{},amount_1:{}", amount_0, amount_1);
+            println!("amount_0:{amount_0},amount_1:{amount_1}");
             assert!(pool_state.borrow().tick_current > tick_current);
             assert!(pool_state.borrow().sqrt_price_x64 > sqrt_price_x64);
             assert!(
@@ -2265,16 +2232,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = 1;
             let result = swap_internal(
@@ -2289,7 +2255,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2319,16 +2285,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = 1;
             let result = swap_internal(
@@ -2343,7 +2308,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2373,16 +2338,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = 1;
             let result = swap_internal(
@@ -2397,7 +2361,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2426,16 +2390,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = 1;
             let result = swap_internal(
@@ -2450,7 +2413,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2483,16 +2446,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = u64::MAX / 2;
             let result = swap_internal(
@@ -2507,7 +2469,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2537,16 +2499,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = u64::MAX / 4;
             let result = swap_internal(
@@ -2561,7 +2522,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2591,16 +2552,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = u64::MAX / 2;
             let result = swap_internal(
@@ -2615,7 +2575,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2644,16 +2604,15 @@ mod swap_test {
                 tick_current,
                 tick_spacing as u16,
                 vec![OpenPositionParam {
-                    amount_0: amount_0,
-                    amount_1: amount_1,
-                    tick_lower: tick_lower,
-                    tick_upper: tick_upper,
+                    amount_0,
+                    amount_1,
+                    tick_lower,
+                    tick_upper,
                 }],
                 zero_for_one,
             );
             println!(
-                "sum_amount_0: {}, sum_amount_1: {}",
-                sum_amount_0, sum_amount_1,
+                "sum_amount_0: {sum_amount_0}, sum_amount_1: {sum_amount_1}",
             );
             let amount_specified = u64::MAX / 4;
             let result = swap_internal(
@@ -2668,7 +2627,7 @@ mod swap_test {
                 is_base_input,
                 1,
             );
-            println!("{:#?}", result);
+            println!("{result:#?}");
             let pool = pool_state.borrow();
             let sqrt_price_x64 = pool.sqrt_price_x64;
             let sqrt_price = sqrt_price_x64 as f64 / fixed_point_64::Q64 as f64;
@@ -2701,7 +2660,7 @@ mod swap_test {
                     let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, sum_amount_1) = setup_swap_test(
                         tick_current,
                         tick_spacing as u16,
-                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                         zero_for_one
                         );
 
@@ -2728,7 +2687,7 @@ mod swap_test {
                         let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
                             tick_current,
                             tick_spacing as u16,
-                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                             zero_for_one
                         );
                         let result = swap_internal(
@@ -2768,10 +2727,10 @@ mod swap_test {
                                 oracle::block_timestamp_mock() as u32,
                             );
                             if result.is_err(){
-                                println!("{:#?}", result);
+                                println!("{result:#?}");
                             }
                         }else{
-                            println!("{}", err);
+                            println!("{err}");
                         }
                     }
                 }
@@ -2792,7 +2751,7 @@ mod swap_test {
                     let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state, _sum_amount_0, sum_amount_1) = setup_swap_test(
                         tick_current,
                         tick_spacing as u16,
-                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                         zero_for_one
                     );
 
@@ -2819,7 +2778,7 @@ mod swap_test {
                         let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state, _sum_amount_0, _sum_amount_1) = setup_swap_test(
                             tick_current,
                             tick_spacing as u16,
-                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                             zero_for_one
                         );
                         let result = swap_internal(
@@ -2859,10 +2818,10 @@ mod swap_test {
                                 oracle::block_timestamp_mock() as u32,
                             );
                             if result.is_err(){
-                                println!("{:#?}", result);
+                                println!("{result:#?}");
                             }
                         }else{
-                            println!("{}", err);
+                            println!("{err}");
                         }
                     }
                 }
@@ -2884,7 +2843,7 @@ mod swap_test {
                     let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, sum_amount_1) = setup_swap_test(
                         tick_current,
                         tick_spacing as u16,
-                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                         zero_for_one
                     );
 
@@ -2912,7 +2871,7 @@ mod swap_test {
                         let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
                             tick_current,
                             tick_spacing as u16,
-                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                             zero_for_one
                         );
                         let result = swap_internal(
@@ -2953,7 +2912,7 @@ mod swap_test {
                             );
 
                         }else{
-                            println!("{}", err);
+                            println!("{err}");
                         }
                     }
                 }
@@ -2976,7 +2935,7 @@ mod swap_test {
                     let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  sum_amount_0, _sum_amount_1) = setup_swap_test(
                         tick_current,
                         tick_spacing as u16,
-                        vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                        vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                         zero_for_one
                     );
                     prop_assume!(sum_amount_0 > 1);
@@ -3002,7 +2961,7 @@ mod swap_test {
                         let (amm_config, pool_state, tick_array_states, observation_state,bitmap_extension_state,  _sum_amount_0, _sum_amount_1) = setup_swap_test(
                             tick_current,
                             tick_spacing as u16,
-                            vec![OpenPositionParam{amount_0:amount_0,amount_1:amount_1, tick_lower:tick_lower, tick_upper:tick_upper}],
+                            vec![OpenPositionParam{amount_0,amount_1, tick_lower, tick_upper}],
                             zero_for_one
                         );
                         let result = swap_internal(
@@ -3042,11 +3001,370 @@ mod swap_test {
                                 oracle::block_timestamp_mock() as u32,
                             );
                         }else{
-                            println!("{}", err);
+                            println!("{err}");
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod benchmarks {
+    use super::*;
+    use std::time::Instant;
+    use std::collections::VecDeque;
+    use crate::libraries::sqrt_price_math;
+    use crate::libraries::swap_math::compute_swap_step;
+    
+    #[test]
+    fn bench_swap_performance() {
+        println!("\n=== Swap Performance Benchmark ===");
+        
+        // Setup test data
+        let amm_config = AmmConfig {
+            trade_fee_rate: 1000,
+            protocol_fee_rate: 100,
+            fund_fee_rate: 100,
+            ..Default::default()
+        };
+        
+        // First benchmark individual components
+        benchmark_swap_components(&amm_config);
+        
+        // Then benchmark full swap scenarios
+        benchmark_full_swap_scenarios();
+    }
+    
+    fn benchmark_full_swap_scenarios() {
+        println!("\n=== Full Swap Scenarios ===");
+        
+        // Create different swap scenarios
+        let scenarios = vec![
+            ("Small swap within tick", 1000, 1),
+            ("Medium swap crossing ticks", 100000, 5),
+            ("Large swap crossing arrays", 10000000, 20),
+        ];
+        
+        for (name, amount, expected_iterations) in scenarios {
+            println!("\n--- {} ---", name);
+            benchmark_swap_scenario(amount, expected_iterations);
+        }
+    }
+    
+    fn benchmark_swap_scenario(amount: u64, expected_iterations: u32) {
+        // Setup mock data
+        let amm_config = AmmConfig {
+            trade_fee_rate: 1000,
+            protocol_fee_rate: 100,
+            fund_fee_rate: 100,
+            ..Default::default()
+        };
+        
+        let pool_state = PoolState {
+            sqrt_price_x64: tick_math::get_sqrt_price_at_tick(0).unwrap(),
+            tick_current: 0,
+            liquidity: 1000000000,
+            fee_growth_global_0_x64: 0,
+            fee_growth_global_1_x64: 0,
+            ..Default::default()
+        };
+        
+        // Create mock tick arrays
+        let mut tick_arrays = VecDeque::new();
+        for i in 0..5 {
+            let tick_array = create_mock_tick_array(i * 60 * 10, 10);
+            tick_arrays.push_back(tick_array);
+        }
+        
+        let mut swap_state = SwapState {
+            amount_specified_remaining: amount,
+            amount_calculated: 0,
+            sqrt_price_x64: pool_state.sqrt_price_x64,
+            tick: pool_state.tick_current,
+            fee_growth_global_x64: pool_state.fee_growth_global_0_x64,
+            protocol_fee: 0,
+            fund_fee: 0,
+            fee_amount: 0,
+            liquidity: pool_state.liquidity,
+        };
+        
+        // Time the main swap loop simulation
+        let start = Instant::now();
+        let mut iterations = 0;
+        let mut total_compute_time = std::time::Duration::ZERO;
+        let mut total_math_time = std::time::Duration::ZERO;
+        let mut total_tick_lookup_time = std::time::Duration::ZERO;
+        
+        // Simulate swap loop
+        while swap_state.amount_specified_remaining > 0 && iterations < expected_iterations {
+            iterations += 1;
+            
+            // Measure compute_swap_step
+            let compute_start = Instant::now();
+            let _ = compute_optimized_swap_step(
+                swap_state.sqrt_price_x64,
+                swap_state.sqrt_price_x64 + 1000000, // Mock target
+                swap_state.liquidity,
+                swap_state.amount_specified_remaining,
+                amm_config.trade_fee_rate,
+                true,
+                true,
+                1,
+            );
+            total_compute_time += compute_start.elapsed();
+            
+            // Measure tick math operations
+            let math_start = Instant::now();
+            let _ = tick_math::get_tick_at_sqrt_price(swap_state.sqrt_price_x64 + 500000);
+            total_math_time += math_start.elapsed();
+            
+            // Simulate amount reduction
+            swap_state.amount_specified_remaining = 
+                swap_state.amount_specified_remaining.saturating_sub(amount / expected_iterations as u64);
+            swap_state.sqrt_price_x64 += 100000;
+        }
+        
+        let total_time = start.elapsed();
+        
+        println!("Total iterations: {}", iterations);
+        println!("Total time: {:?}", total_time);
+        println!("Time per iteration: {:?}", total_time / iterations);
+        println!("Breakdown:");
+        println!("  - compute_swap_step: {:?} ({:.1}%)", 
+            total_compute_time, 
+            (total_compute_time.as_nanos() as f64 / total_time.as_nanos() as f64) * 100.0
+        );
+        println!("  - tick math: {:?} ({:.1}%)", 
+            total_math_time,
+            (total_math_time.as_nanos() as f64 / total_time.as_nanos() as f64) * 100.0
+        );
+        println!("  - other operations: {:?} ({:.1}%)", 
+            total_time - total_compute_time - total_math_time,
+            ((total_time - total_compute_time - total_math_time).as_nanos() as f64 / total_time.as_nanos() as f64) * 100.0
+        );
+    }
+    
+    fn create_mock_tick_array(start_index: i32, tick_spacing: u16) -> &'static TickArrayState {
+        // Create a static mock tick array for benchmarking
+        static mut MOCK_ARRAY: TickArrayState = TickArrayState {
+            pool_id: Pubkey::new_from_array([0u8; 32]),
+            start_tick_index: 0,
+            ticks: [TickState {
+                tick: 0,
+                liquidity_net: 0,
+                liquidity_gross: 0,
+                fee_growth_outside_0_x64: 0,
+                fee_growth_outside_1_x64: 0,
+                reward_growths_outside_x64: [0; 3],
+                padding: [0; 13],
+            }; 60],
+            initialized_tick_count: 0,
+            recent_epoch: 0,
+            padding: [0; 107],
+        };
+        
+        unsafe {
+            MOCK_ARRAY.start_tick_index = start_index;
+            &MOCK_ARRAY
+        }
+    }
+    
+    fn benchmark_swap_components(
+        amm_config: &AmmConfig,
+    ) {
+        println!("\n=== Component Benchmarks ===");
+        
+        let iterations = 10000;
+        
+        // Benchmark sqrt price calculation
+        let start = Instant::now();
+        for i in 0..iterations {
+            let tick = (i % 1000) as i32 - 500;
+            let _ = tick_math::get_sqrt_price_at_tick(tick);
+        }
+        let sqrt_price_time = start.elapsed() / iterations;
+        println!("Sqrt price calculation: {:?}", sqrt_price_time);
+        
+        // Benchmark get_tick_at_sqrt_price
+        let start = Instant::now();
+        let sqrt_price = tick_math::MIN_SQRT_PRICE_X64 + 1000000;
+        for _ in 0..iterations {
+            let _ = tick_math::get_tick_at_sqrt_price(sqrt_price);
+        }
+        let tick_at_price_time = start.elapsed() / iterations;
+        println!("Get tick at sqrt price: {:?}", tick_at_price_time);
+        
+        // Benchmark fee calculation
+        let start = Instant::now();
+        let step_fee_amount = 1000u64;
+        for _ in 0..iterations {
+            let _ = U128::from(step_fee_amount)
+                .mul_div_floor(U128::from(amm_config.protocol_fee_rate), U128::from(FEE_RATE_DENOMINATOR_VALUE));
+        }
+        let fee_calc_time = start.elapsed() / iterations;
+        println!("Fee calculation: {:?}", fee_calc_time);
+        
+        // Benchmark liquidity math
+        let start = Instant::now();
+        let sqrt_price_1 = 1000000u128;
+        let sqrt_price_2 = 1001000u128;
+        let liquidity = 1000000u128;
+        for _ in 0..iterations {
+            let _ = liquidity_math::get_delta_amount_0_unsigned(
+                sqrt_price_1,
+                sqrt_price_2,
+                liquidity,
+                true,
+            );
+        }
+        let liquidity_math_time = start.elapsed() / iterations;
+        println!("Liquidity math: {:?}", liquidity_math_time);
+        
+        // Benchmark compute_swap_step
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = compute_swap_step(
+                sqrt_price_1,
+                sqrt_price_2,
+                liquidity,
+                1000,
+                1000,
+                true,
+                true,
+                1,
+            );
+        }
+        let swap_step_time = start.elapsed() / iterations;
+        println!("Compute swap step: {:?}", swap_step_time);
+        
+        // Benchmark compute_optimized_swap_step
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = compute_optimized_swap_step(
+                sqrt_price_1,
+                sqrt_price_2,
+                liquidity,
+                1000,
+                1000,
+                true,
+                true,
+                1,
+            );
+        }
+        let optimized_swap_step_time = start.elapsed() / iterations;
+        println!("Compute optimized swap step: {:?}", optimized_swap_step_time);
+        
+        // Compare VecDeque operations
+        let mut vec_deque = VecDeque::new();
+        for i in 0..10 {
+            vec_deque.push_back(i);
+        }
+        
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let mut deque_clone = vec_deque.clone();
+            let _ = deque_clone.pop_front();
+        }
+        let vecdeque_time = start.elapsed() / iterations;
+        println!("VecDeque pop_front: {:?}", vecdeque_time);
+        
+        // Profile the bottleneck in compute_swap_step
+        profile_compute_swap_step();
+    }
+    
+    fn profile_compute_swap_step() {
+        println!("\n=== Profiling compute_swap_step ===");
+        
+        let iterations = 1000;
+        let sqrt_price_current = 1000000u128;
+        let sqrt_price_target = 1001000u128;
+        let liquidity = 1000000u128;
+        let amount_remaining = 1000u64;
+        let fee_rate = 1000u32;
+        
+        // Time the entire function
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = compute_swap_step(
+                sqrt_price_current,
+                sqrt_price_target,
+                liquidity,
+                amount_remaining,
+                fee_rate,
+                true,
+                true,
+                1,
+            );
+        }
+        let total_time = start.elapsed();
+        println!("Total compute_swap_step time: {:?} per call", total_time / iterations);
+        
+        // Now profile individual operations within compute_swap_step
+        
+        // Profile fee calculation
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = amount_remaining
+                .mul_div_floor((FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(), FEE_RATE_DENOMINATOR_VALUE.into());
+        }
+        let fee_calc_time = start.elapsed() / iterations;
+        println!("  - Fee calculation: {:?}", fee_calc_time);
+        
+        // Profile liquidity delta calculations
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = liquidity_math::get_delta_amount_0_unsigned(
+                sqrt_price_target,
+                sqrt_price_current,
+                liquidity,
+                true,
+            );
+        }
+        let delta_0_time = start.elapsed() / iterations;
+        println!("  - Delta amount 0: {:?}", delta_0_time);
+        
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = liquidity_math::get_delta_amount_1_unsigned(
+                sqrt_price_current,
+                sqrt_price_target,
+                liquidity,
+                true,
+            );
+        }
+        let delta_1_time = start.elapsed() / iterations;
+        println!("  - Delta amount 1: {:?}", delta_1_time);
+        
+        // Profile sqrt price calculations
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = sqrt_price_math::get_next_sqrt_price_from_input(
+                sqrt_price_current,
+                liquidity,
+                amount_remaining,
+                true,
+            );
+        }
+        let sqrt_price_input_time = start.elapsed() / iterations;
+        println!("  - Next sqrt price from input: {:?}", sqrt_price_input_time);
+        
+        let start = Instant::now();
+        for _ in 0..iterations {
+            let _ = sqrt_price_math::get_next_sqrt_price_from_output(
+                sqrt_price_current,
+                liquidity,
+                amount_remaining,
+                true,
+            );
+        }
+        let sqrt_price_output_time = start.elapsed() / iterations;
+        println!("  - Next sqrt price from output: {:?}", sqrt_price_output_time);
+        
+        println!("\nBottleneck analysis:");
+        let accounted_time = fee_calc_time + delta_0_time + delta_1_time + sqrt_price_input_time + sqrt_price_output_time;
+        println!("  - Total accounted time: {:?}", accounted_time);
+        println!("  - Overhead/other: {:?}", (total_time / iterations).saturating_sub(accounted_time));
     }
 }

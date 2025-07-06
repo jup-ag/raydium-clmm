@@ -35,7 +35,7 @@ impl<'info, T: ZeroCopy + Owner> AccountLoad<'info, T> {
         }
         // Discriminator must match.
         let disc_bytes = array_ref![data, 0, 8];
-        if disc_bytes != &T::DISCRIMINATOR {
+        if disc_bytes != T::DISCRIMINATOR {
             return Err(ErrorCode::AccountDiscriminatorMismatch.into());
         }
 
@@ -75,7 +75,7 @@ impl<'info, T: ZeroCopy + Owner> AccountLoad<'info, T> {
         }
 
         // write discriminator
-        data[..8].copy_from_slice(&T::DISCRIMINATOR);
+        data[..8].copy_from_slice(T::DISCRIMINATOR);
 
         Ok(RefMut::map(data, |data| {
             bytemuck::from_bytes_mut(&mut data.deref_mut()[8..mem::size_of::<T>() + 8])
@@ -100,7 +100,7 @@ impl<'info, T: ZeroCopy + Owner> AccountLoad<'info, T> {
         }
 
         let disc_bytes = array_ref![data, 0, 8];
-        if disc_bytes != &T::DISCRIMINATOR {
+        if disc_bytes != T::DISCRIMINATOR {
             return Err(ErrorCode::AccountDiscriminatorMismatch.into());
         }
 
@@ -117,7 +117,7 @@ impl<'info, T: ZeroCopy + Owner> AccountLoad<'info, T> {
         }
 
         let disc_bytes = array_ref![data, 0, 8];
-        if disc_bytes != &T::DISCRIMINATOR {
+        if disc_bytes != T::DISCRIMINATOR {
             return Err(ErrorCode::AccountDiscriminatorMismatch.into());
         }
 
@@ -140,7 +140,7 @@ impl<'info, T: ZeroCopy + Owner> AccountLoad<'info, T> {
         }
 
         let disc_bytes = array_ref![data, 0, 8];
-        if disc_bytes != &T::DISCRIMINATOR {
+        if disc_bytes != T::DISCRIMINATOR {
             return Err(ErrorCode::AccountDiscriminatorMismatch.into());
         }
 

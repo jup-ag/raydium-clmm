@@ -54,7 +54,7 @@ pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
         let pool_state_loader =
             AccountLoader::<PoolState>::try_from(remaining_accounts.next().unwrap())?;
         let output_token_account = Box::new(InterfaceAccount::<TokenAccount>::try_from(
-            &remaining_accounts.next().unwrap(),
+            remaining_accounts.next().unwrap(),
         )?);
         let input_vault = Box::new(InterfaceAccount::<TokenAccount>::try_from(
             remaining_accounts.next().unwrap(),
