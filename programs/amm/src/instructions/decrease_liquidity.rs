@@ -11,7 +11,7 @@ use std::cell::RefMut;
 use std::ops::DerefMut;
 
 /// Memo msg for decrease liquidity
-pub const DECREASE_MEMO_MSG: &'static [u8] = b"raydium_decrease";
+pub const DECREASE_MEMO_MSG: &[u8] = b"raydium_decrease";
 #[derive(Accounts)]
 pub struct DecreaseLiquidity<'info> {
     /// The position owner or delegated authority
@@ -216,7 +216,7 @@ pub fn decrease_liquidity_v1<'a, 'b, 'c: 'info, 'info>(
         None,
         None,
         None,
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_min,
         amount_1_min,
@@ -244,7 +244,7 @@ pub fn decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
         Some(ctx.accounts.memo_program.clone()),
         Some(ctx.accounts.vault_0_mint.clone()),
         Some(ctx.accounts.vault_1_mint.clone()),
-        &ctx.remaining_accounts,
+        ctx.remaining_accounts,
         liquidity,
         amount_0_min,
         amount_1_min,
@@ -299,7 +299,7 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
             tick_array_upper_loader.load()?.start_tick_index,
         ]);
 
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info
                 .key()
                 .eq(&TickArrayBitmapExtension::key(pool_state.key()))
@@ -330,17 +330,15 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
 
     let mut transfer_fee_0 = 0;
     let mut transfer_fee_1 = 0;
-    if vault_0_mint.is_some() {
-        transfer_fee_0 =
-            util::get_transfer_fee(vault_0_mint.clone().unwrap(), decrease_amount_0).unwrap();
+    if let Some(mint) = vault_0_mint.clone() {
+        transfer_fee_0 = util::get_transfer_fee(mint, decrease_amount_0)?;
     }
-    if vault_1_mint.is_some() {
-        transfer_fee_1 =
-            util::get_transfer_fee(vault_1_mint.clone().unwrap(), decrease_amount_1).unwrap();
+    if let Some(mint) = vault_1_mint.clone() {
+        transfer_fee_1 = util::get_transfer_fee(mint, decrease_amount_1)?;
     }
     emit!(LiquidityCalculateEvent {
         pool_liquidity: liquidity_before,
-        pool_sqrt_price_x64: pool_sqrt_price_x64,
+        pool_sqrt_price_x64,
         pool_tick: pool_tick_current,
         calc_amount_0: decrease_amount_0,
         calc_amount_1: decrease_amount_1,
@@ -375,8 +373,8 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
     let transfer_amount_1 = decrease_amount_1 + latest_fees_owed_1;
 
     let mut token_2022_program_opt: Option<AccountInfo> = None;
-    if token_program_2022.is_some() {
-        token_2022_program_opt = Some(token_program_2022.clone().unwrap().to_account_info());
+    if let Some(program) = token_program_2022.clone() {
+        token_2022_program_opt = Some(program.to_account_info());
     }
 
     transfer_from_pool_vault_to_user(
@@ -411,22 +409,18 @@ pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
         token_program,
         token_2022_program_opt.clone(),
         personal_position,
-        if token_2022_program_opt.is_none() {
-            false
-        } else {
-            true
-        },
+        token_2022_program_opt.is_some(),
     )?;
     emit!(DecreaseLiquidityEvent {
         position_nft_mint: personal_position.nft_mint,
         liquidity,
-        decrease_amount_0: decrease_amount_0,
-        decrease_amount_1: decrease_amount_1,
+        decrease_amount_0,
+        decrease_amount_1,
         fee_amount_0: latest_fees_owed_0,
         fee_amount_1: latest_fees_owed_1,
         reward_amounts,
-        transfer_fee_0: transfer_fee_0,
-        transfer_fee_1: transfer_fee_1,
+        transfer_fee_0,
+        transfer_fee_1,
     });
 
     Ok(())
@@ -475,7 +469,8 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
 
         // update rewards, must update before decrease liquidity
         personal_position.update_rewards(protocol_position.reward_growth_inside, true)?;
-        personal_position.liquidity = personal_position.liquidity.checked_sub(liquidity).unwrap();
+        personal_position.liquidity = personal_position.liquidity.checked_sub(liquidity)
+            .ok_or(ErrorCode::CalculateOverflow)?;
     }
 
     let mut latest_fees_owed_0 = 0;
@@ -499,11 +494,11 @@ pub fn decrease_liquidity_and_update_position<'a, 'b, 'c: 'info, 'info>(
         pool_state.total_fees_claimed_token_0 = pool_state
             .total_fees_claimed_token_0
             .checked_add(latest_fees_owed_0)
-            .unwrap();
+            .ok_or(ErrorCode::CalculateOverflow)?;
         pool_state.total_fees_claimed_token_1 = pool_state
             .total_fees_claimed_token_1
             .checked_add(latest_fees_owed_1)
-            .unwrap();
+            .ok_or(ErrorCode::CalculateOverflow)?;
     }
 
     Ok((
@@ -534,7 +529,7 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         .get_tick_state_mut(protocol_position.tick_upper_index, pool_state.tick_spacing)?;
     let clock = Clock::get()?;
     let (amount_0, amount_1, flip_tick_lower, flip_tick_upper) = modify_position(
-        -i128::try_from(liquidity).unwrap(),
+        -i128::try_from(liquidity).map_err(|_| ErrorCode::CalculateOverflow)?,
         pool_state,
         protocol_position,
         &mut tick_lower_state,
@@ -580,17 +575,17 @@ pub fn burn_liquidity<'c: 'info, 'info>(
         tick: pool_state.tick_current,
         tick_lower: protocol_position.tick_lower_index,
         tick_upper: protocol_position.tick_upper_index,
-        liquidity_before: liquidity_before,
+        liquidity_before,
         liquidity_after: pool_state.liquidity,
     });
 
     Ok((amount_0, amount_1))
 }
 
-pub fn collect_rewards<'a, 'b, 'c, 'info>(
+pub fn collect_rewards<'info>(
     pool_state_loader: &AccountLoader<'info, PoolState>,
     remaining_accounts: &[&'info AccountInfo<'info>],
-    token_program: &'b Program<'info, Token>,
+    token_program: &Program<'info, Token>,
     token_program_2022: Option<AccountInfo<'info>>,
     personal_position_state: &mut PersonalPositionState,
     need_reward_mint: bool,
@@ -604,7 +599,7 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
     }
     let mut reward_group_account_num = 3;
     if !need_reward_mint {
-        reward_group_account_num = reward_group_account_num - 1
+        reward_group_account_num -= 1
     }
     check_required_accounts_length(
         pool_state_loader,
@@ -616,14 +611,16 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
     let mut remaining_accounts = remaining_accounts.iter();
     for i in 0..remaining_accounts_len / reward_group_account_num {
         let reward_token_vault =
-            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
+            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next()
+                .ok_or(ErrorCode::AccountLack)?)?;
         let recipient_token_account =
-            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
+            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next()
+                .ok_or(ErrorCode::AccountLack)?)?;
 
         let mut reward_vault_mint: Option<Box<InterfaceAccount<Mint>>> = None;
         if need_reward_mint {
             reward_vault_mint = Some(Box::new(InterfaceAccount::<Mint>::try_from(
-                remaining_accounts.next().unwrap(),
+                remaining_accounts.next().ok_or(ErrorCode::AccountLack)?,
             )?));
         }
         require_keys_eq!(reward_token_vault.mint, recipient_token_account.mint);
@@ -654,17 +651,18 @@ pub fn collect_rewards<'a, 'b, 'c, 'info>(
                 reward_amount_owed
             );
             personal_position_state.reward_infos[i].reward_amount_owed =
-                reward_amount_owed.checked_sub(transfer_amount).unwrap();
+                reward_amount_owed.checked_sub(transfer_amount)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
             pool_state_loader
                 .load_mut()?
                 .add_reward_clamed(i, transfer_amount)?;
 
             transfer_from_pool_vault_to_user(
-                &pool_state_loader,
+                pool_state_loader,
                 &reward_token_vault,
                 &recipient_token_account,
                 reward_vault_mint,
-                &token_program,
+                token_program,
                 token_program_2022.clone(),
                 transfer_amount,
             )?;
@@ -684,7 +682,7 @@ fn check_required_accounts_length(
     let mut valid_reward_count = 0;
     for item in pool_state.reward_infos {
         if item.initialized() {
-            valid_reward_count = valid_reward_count + 1;
+            valid_reward_count += 1;
         }
     }
     let remaining_accounts_len = remaining_accounts.len();
@@ -707,11 +705,11 @@ pub fn check_unclaimed_fees_and_vault(
     let unclaimed_fee_token_0 = pool_state
         .total_fees_token_0
         .checked_sub(pool_state.total_fees_claimed_token_0)
-        .unwrap();
+        .ok_or(ErrorCode::CalculateOverflow)?;
     let unclaimed_fee_token_1 = pool_state
         .total_fees_token_1
         .checked_sub(pool_state.total_fees_claimed_token_1)
-        .unwrap();
+        .ok_or(ErrorCode::CalculateOverflow)?;
 
     if (unclaimed_fee_token_0 >= token_vault_0.amount && token_vault_0.amount != 0)
         || (unclaimed_fee_token_1 >= token_vault_1.amount && token_vault_1.amount != 0)

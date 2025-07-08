@@ -35,12 +35,39 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
 ) -> u128 {
     if amount == 0 {
         return sqrt_price_x64;
-    };
+    }
+    
+    // Fast path for small values using u128 arithmetic
+    if liquidity <= u64::MAX as u128 && sqrt_price_x64 <= u64::MAX as u128 && add {
+        let numerator_1 = liquidity << 64; // liquidity * 2^64
+        
+        if let Some(product) = (amount as u128).checked_mul(sqrt_price_x64) {
+            if let Some(denominator) = numerator_1.checked_add(product) {
+                if denominator > 0 {
+                let result = numerator_1.checked_mul(sqrt_price_x64).map(|n| n.div_ceil(denominator));
+                
+                if let Some(result) = result {
+                    return result;
+                }
+                }
+            }
+        }
+        
+        // Alternative formula for overflow case
+        let quotient = numerator_1 / sqrt_price_x64;
+        if let Some(sum) = quotient.checked_add(amount as u128) {
+            if sum > 0 {
+                return numerator_1.div_ceil(sum);
+            }
+        }
+    }
+    
+    // Fallback to U256 arithmetic for larger values or subtract case
     let numerator_1 = (U256::from(liquidity)) << fixed_point_64::RESOLUTION;
 
     if add {
         if let Some(product) = U256::from(amount).checked_mul(U256::from(sqrt_price_x64)) {
-            let denominator = numerator_1 + U256::from(product);
+            let denominator = numerator_1 + product;
             if denominator >= numerator_1 {
                 return numerator_1
                     .mul_div_ceil(U256::from(sqrt_price_x64), denominator)
@@ -57,11 +84,9 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
         )
         .as_u128()
     } else {
-        let product = U256::from(
-            U256::from(amount)
+        let product = U256::from(amount)
                 .checked_mul(U256::from(sqrt_price_x64))
-                .unwrap(),
-        );
+                .unwrap();
         let denominator = numerator_1.checked_sub(product).unwrap();
         numerator_1
             .mul_div_ceil(U256::from(sqrt_price_x64), denominator)
@@ -90,6 +115,25 @@ pub fn get_next_sqrt_price_from_amount_1_rounding_down(
     amount: u64,
     add: bool,
 ) -> u128 {
+    // Fast path for small values using u128 arithmetic
+    if liquidity <= u64::MAX as u128 {
+        let amount_shifted = (amount as u128) << 64; // amount * 2^64
+        
+        if add {
+            let quotient = amount_shifted / liquidity;
+            if let Some(result) = sqrt_price_x64.checked_add(quotient) {
+                return result;
+            }
+        } else {
+            let quotient = amount_shifted.div_ceil(liquidity);
+            if let Some(result) = sqrt_price_x64.checked_sub(quotient) {
+                return result;
+            }
+        }
+        // Fall through to U256 arithmetic if overflow/underflow
+    }
+    
+    // Fallback to U256 arithmetic for larger values
     if add {
         let quotient = U256::from(u128::from(amount) << fixed_point_64::RESOLUTION) / liquidity;
         sqrt_price_x64.checked_add(quotient.as_u128()).unwrap()
@@ -98,7 +142,7 @@ pub fn get_next_sqrt_price_from_amount_1_rounding_down(
             U256::from(u128::from(amount) << fixed_point_64::RESOLUTION),
             U256::from(liquidity),
         );
-        sqrt_price_x64.checked_sub(quotient.as_u128()).unwrap()
+        sqrt_price_x64.saturating_sub(quotient.as_u128())
     }
 }
 

@@ -67,9 +67,11 @@ pub fn check_current_tick_array_is_initialized(
         return Ok((true, (compressed - 512) * multiplier));
     }
     // the current bit is not initialized
-    return Ok((false, (compressed - 512) * multiplier));
+    Ok((false, (compressed - 512) * multiplier))
 }
 
+/// Optimized bitmap traversal with cached calculations
+#[inline]
 pub fn next_initialized_tick_array_start_index(
     bit_map: U1024,
     last_tick_array_start_index: i32,
@@ -80,13 +82,18 @@ pub fn next_initialized_tick_array_start_index(
         last_tick_array_start_index,
         tick_spacing
     ));
+    
+    // Cache expensive calculations
     let tick_boundary = max_tick_in_tickarray_bitmap(tick_spacing);
+    let tick_count = TickArrayState::tick_count(tick_spacing);
+    
     let next_tick_array_start_index = if zero_for_one {
-        last_tick_array_start_index - TickArrayState::tick_count(tick_spacing)
+        last_tick_array_start_index - tick_count
     } else {
-        last_tick_array_start_index + TickArrayState::tick_count(tick_spacing)
+        last_tick_array_start_index + tick_count
     };
 
+    // Early bounds check
     if next_tick_array_start_index < -tick_boundary || next_tick_array_start_index >= tick_boundary
     {
         return (false, last_tick_array_start_index);
@@ -101,33 +108,35 @@ pub fn next_initialized_tick_array_start_index(
     let bit_pos = compressed.abs();
 
     if zero_for_one {
-        // tick from upper to lower
-        // find from highter bits to lower bits
-        let offset_bit_map = bit_map << (1024 - bit_pos - 1).try_into().unwrap();
-        let next_bit = most_significant_bit(offset_bit_map);
-        if next_bit.is_some() {
+        // tick from upper to lower - optimized bit manipulation
+        let shift_amount = (1024 - bit_pos - 1) as u32;
+        if shift_amount >= 1024 {
+            return (false, -tick_boundary);
+        }
+        
+        let offset_bit_map = bit_map << shift_amount.try_into().unwrap();
+        if let Some(next_bit) = most_significant_bit(offset_bit_map) {
             let next_array_start_index =
-                (bit_pos - i32::from(next_bit.unwrap()) - 512) * multiplier;
+                (bit_pos - i32::from(next_bit) - 512) * multiplier;
             (true, next_array_start_index)
         } else {
-            // not found til to the end
             (false, -tick_boundary)
         }
     } else {
-        // tick from lower to upper
-        // find from lower bits to highter bits
-        let offset_bit_map = bit_map >> (bit_pos).try_into().unwrap();
-        let next_bit = least_significant_bit(offset_bit_map);
-        if next_bit.is_some() {
+        // tick from lower to upper - optimized bit manipulation  
+        let shift_amount = bit_pos as u32;
+        if shift_amount >= 1024 {
+            return (false, tick_boundary);
+        }
+        
+        let offset_bit_map = bit_map >> shift_amount.try_into().unwrap();
+        if let Some(next_bit) = least_significant_bit(offset_bit_map) {
             let next_array_start_index =
-                (bit_pos + i32::from(next_bit.unwrap()) - 512) * multiplier;
+                (bit_pos + i32::from(next_bit) - 512) * multiplier;
             (true, next_array_start_index)
         } else {
             // not found til to the end
-            (
-                false,
-                tick_boundary - TickArrayState::tick_count(tick_spacing),
-            )
+            (false, tick_boundary - TickArrayState::tick_count(tick_spacing))
         }
     }
 }
@@ -165,7 +174,7 @@ mod test {
                 .unwrap();
             if ret.0 && ret.1 != start_index {
                 start_index = ret.1;
-                println!("{}-{}", tick_current, start_index);
+                println!("{tick_current}-{start_index}");
             }
             tick_current += 600;
         }
@@ -182,7 +191,7 @@ mod test {
                 tick_spacing,
                 true,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -202,7 +211,7 @@ mod test {
                 tick_spacing,
                 true,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -222,7 +231,7 @@ mod test {
                 tick_spacing,
                 true,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -243,7 +252,7 @@ mod test {
                 tick_spacing,
                 false,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -263,7 +272,7 @@ mod test {
                 tick_spacing,
                 false,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -283,7 +292,7 @@ mod test {
                 tick_spacing,
                 false,
             );
-            println!("{:?}", array_start_index);
+            println!("{array_start_index:?}");
             if !is_found {
                 break;
             }
@@ -359,7 +368,7 @@ mod test {
             tick_spacing as u16,
             false,
         );
-        assert!(is_found == false);
+        assert!(!is_found);
         assert!(array_start_index == tick_array_start_index);
 
         tick_array_start_index =
@@ -370,7 +379,7 @@ mod test {
             tick_spacing as u16,
             true,
         );
-        assert!(is_found == false);
+        assert!(!is_found);
         assert!(array_start_index == tick_array_start_index);
     }
 

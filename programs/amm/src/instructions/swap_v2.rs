@@ -11,7 +11,7 @@ use anchor_spl::token::Token;
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 
 /// Memo msg for swap
-pub const SWAP_MEMO_MSG: &'static [u8] = b"raydium_swap";
+pub const SWAP_MEMO_MSG: &[u8] = b"raydium_swap";
 #[derive(Accounts)]
 pub struct SwapSingleV2<'info> {
     /// The user performing the swap
@@ -99,13 +99,12 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
     // calculate specified amount because the amount includes thransfer_fee as input and without thransfer_fee as output
     let amount_calculate_specified = if is_base_input {
         let transfer_fee =
-            util::get_transfer_fee(ctx.input_vault_mint.clone(), amount_specified).unwrap();
-        amount_specified - transfer_fee
+            util::get_transfer_fee(ctx.input_vault_mint.clone(), amount_specified)?;
+        amount_specified.checked_sub(transfer_fee).ok_or(ErrorCode::CalculateOverflow)?
     } else {
         let transfer_fee =
-            util::get_transfer_inverse_fee(ctx.output_vault_mint.clone(), amount_specified)
-                .unwrap();
-        amount_specified + transfer_fee
+            util::get_transfer_inverse_fee(ctx.output_vault_mint.clone(), amount_specified)?;
+        amount_specified.checked_add(transfer_fee).ok_or(ErrorCode::CalculateOverflow)?
     };
 
     {
@@ -130,7 +129,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         let tick_array_states = &mut VecDeque::new();
 
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(
                     *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
@@ -206,12 +205,13 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
     let transfer_amount_0;
     let transfer_amount_1;
     if zero_for_one {
-        transfer_fee_0 = util::get_transfer_inverse_fee(vault_0_mint.clone(), amount_0).unwrap();
-        transfer_fee_1 = util::get_transfer_fee(vault_1_mint.clone(), amount_1).unwrap();
+        transfer_fee_0 = util::get_transfer_inverse_fee(vault_0_mint.clone(), amount_0)?;
+        transfer_fee_1 = util::get_transfer_fee(vault_1_mint.clone(), amount_1)?;
 
         amount_0_without_fee = amount_0;
-        amount_1_without_fee = amount_1.checked_sub(transfer_fee_1).unwrap();
-        (transfer_amount_0, transfer_amount_1) = (amount_0 + transfer_fee_0, amount_1);
+        amount_1_without_fee = amount_1.checked_sub(transfer_fee_1).ok_or(ErrorCode::CalculateOverflow)?;
+        transfer_amount_0 = amount_0.checked_add(transfer_fee_0).ok_or(ErrorCode::CalculateOverflow)?;
+        transfer_amount_1 = amount_1;
         #[cfg(feature = "enable-log")]
         msg!(
             "amount_0:{}, transfer_fee_0:{}, amount_1:{}, transfer_fee_1:{}",
@@ -245,12 +245,13 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             transfer_amount_1,
         )?;
     } else {
-        transfer_fee_0 = util::get_transfer_fee(vault_0_mint.clone(), amount_0).unwrap();
-        transfer_fee_1 = util::get_transfer_inverse_fee(vault_1_mint.clone(), amount_1).unwrap();
+        transfer_fee_0 = util::get_transfer_fee(vault_0_mint.clone(), amount_0)?;
+        transfer_fee_1 = util::get_transfer_inverse_fee(vault_1_mint.clone(), amount_1)?;
 
-        amount_0_without_fee = amount_0.checked_sub(transfer_fee_0).unwrap();
+        amount_0_without_fee = amount_0.checked_sub(transfer_fee_0).ok_or(ErrorCode::CalculateOverflow)?;
         amount_1_without_fee = amount_1;
-        (transfer_amount_0, transfer_amount_1) = (amount_0, amount_1 + transfer_fee_1);
+        transfer_amount_0 = amount_0;
+        transfer_amount_1 = amount_1.checked_add(transfer_fee_1).ok_or(ErrorCode::CalculateOverflow)?;
         #[cfg(feature = "enable-log")]
         msg!(
             "amount_0:{}, transfer_fee_0:{}, amount_1:{}, transfer_fee_1:{}",
@@ -313,12 +314,10 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             } else {
                 require_eq!(amount_specified, transfer_amount_1);
             }
+        } else if zero_for_one {
+            require_eq!(amount_specified, transfer_amount_1);
         } else {
-            if zero_for_one {
-                require_eq!(amount_specified, transfer_amount_1);
-            } else {
-                require_eq!(amount_specified, transfer_amount_0);
-            }
+            require_eq!(amount_specified, transfer_amount_0);
         }
     }
 
@@ -327,11 +326,11 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
             .output_token_account
             .amount
             .checked_sub(output_balance_before)
-            .unwrap())
+            .ok_or(ErrorCode::CalculateOverflow)?)
     } else {
         Ok(input_balance_before
             .checked_sub(ctx.input_token_account.amount)
-            .unwrap())
+            .ok_or(ErrorCode::CalculateOverflow)?)
     }
 }
 

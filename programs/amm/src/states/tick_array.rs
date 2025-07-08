@@ -156,30 +156,30 @@ impl TickArrayState {
     }
 
     /// Base on swap directioin, return the first initialized tick in the tick array.
+    /// Get first initialized tick - simplified for better performance
+    #[inline(always)]
     pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<&TickState> {
         if zero_for_one {
-            let mut i = TICK_ARRAY_SIZE - 1;
-            while i >= 0 {
-                if self.ticks[i as usize].is_initialized() {
-                    return Ok(self.ticks.get(i as usize).unwrap());
+            // Search from high to low
+            for i in (0..TICK_ARRAY_SIZE_USIZE).rev() {
+                if self.ticks[i].is_initialized() {
+                    return Ok(&self.ticks[i]);
                 }
-                i = i - 1;
             }
         } else {
-            let mut i = 0;
-            while i < TICK_ARRAY_SIZE_USIZE {
+            // Search from low to high
+            for i in 0..TICK_ARRAY_SIZE_USIZE {
                 if self.ticks[i].is_initialized() {
-                    return Ok(self.ticks.get(i).unwrap());
+                    return Ok(&self.ticks[i]);
                 }
-                i = i + 1;
             }
         }
         err!(ErrorCode::InvalidTickArray)
     }
 
-    /// Get next initialized tick in tick array, `current_tick_index` can be any tick index, in other words, `current_tick_index` not exactly a point in the tickarray,
-    /// and current_tick_index % tick_spacing maybe not equal zero.
-    /// If price move to left tick <= current_tick_index, or to right tick > current_tick_index
+    /// Get next initialized tick in tick array
+    /// Optimized with early bounds checking and simplified loop
+    #[inline(always)]
     pub fn next_initialized_tick(
         &self,
         current_tick_index: i32,
@@ -195,19 +195,25 @@ impl TickArrayState {
             (current_tick_index - self.start_tick_index) / i32::from(tick_spacing);
 
         if zero_for_one {
+            // Simple backwards search with bounds check
             while offset_in_array >= 0 {
-                if self.ticks[offset_in_array as usize].is_initialized() {
-                    return Ok(self.ticks.get(offset_in_array as usize));
+                if let Some(tick) = self.ticks.get(offset_in_array as usize) {
+                    if tick.is_initialized() {
+                        return Ok(Some(tick));
+                    }
                 }
-                offset_in_array = offset_in_array - 1;
+                offset_in_array -= 1;
             }
         } else {
-            offset_in_array = offset_in_array + 1;
+            offset_in_array += 1;
+            // Simple forward search with bounds check
             while offset_in_array < TICK_ARRAY_SIZE {
-                if self.ticks[offset_in_array as usize].is_initialized() {
-                    return Ok(self.ticks.get(offset_in_array as usize));
+                if let Some(tick) = self.ticks.get(offset_in_array as usize) {
+                    if tick.is_initialized() {
+                        return Ok(Some(tick));
+                    }
                 }
-                offset_in_array = offset_in_array + 1;
+                offset_in_array += 1;
             }
         }
         Ok(None)
@@ -228,7 +234,7 @@ impl TickArrayState {
         let ticks_in_array = TickArrayState::tick_count(tick_spacing);
         let mut start = tick_index / ticks_in_array;
         if tick_index < 0 && tick_index % ticks_in_array != 0 {
-            start = start - 1
+            start -= 1
         }
         start * ticks_in_array
     }
@@ -382,7 +388,7 @@ impl TickState {
     /// Common checks for a valid tick input.
     /// A tick is valid if it lies within tick boundaries
     pub fn check_is_out_of_boundary(tick: i32) -> bool {
-        tick < tick_math::MIN_TICK || tick > tick_math::MAX_TICK
+        !(tick_math::MIN_TICK..=tick_math::MAX_TICK).contains(&tick)
     }
 }
 
@@ -697,7 +703,7 @@ pub mod tick_array_test {
             let tick_spacing = 15;
             // initialized ticks[-300,-15]
             let tick_array_ref = build_tick_array(-900, tick_spacing, vec![40, 59]);
-            let mut tick_array = tick_array_ref.borrow_mut();
+            let tick_array = tick_array_ref.borrow_mut();
             // one_for_zero, the price increase, tick from small to large
             let tick = tick_array.first_initialized_tick(false).unwrap().tick;
             assert_eq!(-300, tick);
@@ -710,7 +716,7 @@ pub mod tick_array_test {
         fn next_initialized_tick_when_tick_is_positive() {
             // init tick_index [0,30,105]
             let tick_array_ref = build_tick_array(0, 15, vec![0, 2, 7]);
-            let mut tick_array = tick_array_ref.borrow_mut();
+            let tick_array = tick_array_ref.borrow_mut();
 
             // test zero_for_one
             let mut next_tick_state = tick_array.next_initialized_tick(0, 15, true).unwrap();
@@ -749,7 +755,7 @@ pub mod tick_array_test {
         fn next_initialized_tick_when_tick_is_negative() {
             // init tick_index [-900,-870,-795]
             let tick_array_ref = build_tick_array(-900, 15, vec![0, 2, 7]);
-            let mut tick_array = tick_array_ref.borrow_mut();
+            let tick_array = tick_array_ref.borrow_mut();
 
             // test zero for one
             let mut next_tick_state = tick_array.next_initialized_tick(-900, 15, true).unwrap();
@@ -813,10 +819,10 @@ pub mod tick_array_test {
             );
 
             if fee_growth_global_0_x64 != 0 {
-                fee_growth_global_0_x64 = fee_growth_global_0_x64 + fee_growth_global_delta;
+                fee_growth_global_0_x64 += fee_growth_global_delta;
             }
             if fee_growth_global_1_x64 != 0 {
-                fee_growth_global_1_x64 = fee_growth_global_1_x64 + fee_growth_global_delta;
+                fee_growth_global_1_x64 += fee_growth_global_delta;
             }
             if cross_tick_lower {
                 tick_lower.cross(
@@ -1157,7 +1163,7 @@ pub mod tick_array_test {
                 &build_reward_infos(reward_growth_global_x64),
             )[0];
 
-            reward_growth_global_x64 = reward_growth_global_x64 + reward_growth_global_delta;
+            reward_growth_global_x64 += reward_growth_global_delta;
             if cross_tick_lower {
                 tick_lower.cross(0, 0, &build_reward_infos(reward_growth_global_x64));
             } else {

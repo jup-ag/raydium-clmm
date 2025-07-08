@@ -98,11 +98,11 @@ pub fn set_reward_params<'a, 'b, 'c: 'info, 'info>(
         let mut remaining_accounts = ctx.remaining_accounts.iter();
 
         let reward_token_vault =
-            InterfaceAccount::<TokenAccount>::try_from(&remaining_accounts.next().unwrap())?;
+            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
         let authority_token_account =
-            InterfaceAccount::<TokenAccount>::try_from(&remaining_accounts.next().unwrap())?;
+            InterfaceAccount::<TokenAccount>::try_from(remaining_accounts.next().unwrap())?;
         let reward_vault_mint =
-            InterfaceAccount::<Mint>::try_from(&remaining_accounts.next().unwrap())?;
+            InterfaceAccount::<Mint>::try_from(remaining_accounts.next().unwrap())?;
 
         require_keys_eq!(reward_token_vault.mint, authority_token_account.mint);
         require_keys_eq!(reward_token_vault.key(), reward_info.token_vault);
@@ -132,8 +132,7 @@ fn normal_update(
     if reward_info.last_update_time == reward_info.end_time {
         // reward emission has finished
         let time_delta = end_time.checked_sub(open_time).unwrap();
-        if time_delta < reward_period_limit::MIN_REWARD_PERIOD
-            || time_delta > reward_period_limit::MAX_REWARD_PERIOD
+        if !(reward_period_limit::MIN_REWARD_PERIOD..=reward_period_limit::MAX_REWARD_PERIOD).contains(&time_delta)
         {
             return Err(ErrorCode::InvalidRewardPeriod.into());
         }
@@ -153,8 +152,7 @@ fn normal_update(
         // reward emission does not finish
         let left_reward_time = reward_info.end_time.checked_sub(current_timestamp).unwrap();
         let extend_period = end_time.checked_sub(reward_info.end_time).unwrap();
-        if extend_period < reward_period_limit::MIN_REWARD_PERIOD
-            || extend_period > reward_period_limit::MAX_REWARD_PERIOD
+        if !(reward_period_limit::MIN_REWARD_PERIOD..=reward_period_limit::MAX_REWARD_PERIOD).contains(&extend_period)
         {
             return err!(ErrorCode::NotApproveUpdateRewardEmissiones);
         }

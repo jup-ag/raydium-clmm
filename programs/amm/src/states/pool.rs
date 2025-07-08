@@ -167,7 +167,7 @@ impl PoolState {
 
     pub fn seeds(&self) -> [&[u8]; 5] {
         [
-            &POOL_SEED.as_bytes(),
+            POOL_SEED.as_bytes(),
             self.amm_config.as_ref(),
             self.token_mint_0.as_ref(),
             self.token_mint_1.as_ref(),
@@ -340,7 +340,7 @@ impl PoolState {
 
                 reward_info.reward_growth_global_x64 = reward_info
                     .reward_growth_global_x64
-                    .checked_add(reward_growth_delta.as_u128())
+                    .checked_add(reward_growth_delta.low_u128())
                     .unwrap();
 
                 reward_info.reward_total_emissioned = reward_info
@@ -420,7 +420,7 @@ impl PoolState {
         let tick_array_offset_in_bitmap = self.get_tick_array_offset(tick_array_start_index)?;
 
         let tick_array_bitmap = U1024(self.tick_array_bitmap);
-        let mask = U1024::one() << tick_array_offset_in_bitmap.try_into().unwrap();
+        let mask = U1024::one() << tick_array_offset_in_bitmap;
         self.tick_array_bitmap = tick_array_bitmap.bitxor(mask).0;
         Ok(())
     }
@@ -462,7 +462,7 @@ impl PoolState {
                 check_current_tick_array_is_initialized(
                     U1024(self.tick_array_bitmap),
                     self.tick_current,
-                    self.tick_spacing.into(),
+                    self.tick_spacing,
                 )?
             };
         if is_initialized {
@@ -477,7 +477,7 @@ impl PoolState {
             next_start_index.is_some(),
             ErrorCode::InsufficientLiquidityForDirection
         );
-        return Ok((false, next_start_index.unwrap()));
+        Ok((false, next_start_index.unwrap()))
     }
 
     pub fn next_initialized_tick_array_start_index(
@@ -518,8 +518,7 @@ impl PoolState {
             }
             last_tick_array_start_index = start_index;
 
-            if last_tick_array_start_index < tick_math::MIN_TICK
-                || last_tick_array_start_index > tick_math::MAX_TICK
+            if !(tick_math::MIN_TICK..=tick_math::MAX_TICK).contains(&last_tick_array_start_index)
             {
                 return Ok(None);
             }
@@ -531,18 +530,18 @@ impl PoolState {
     }
 
     pub fn set_status_by_bit(&mut self, bit: PoolStatusBitIndex, flag: PoolStatusBitFlag) {
-        let s = u8::from(1) << (bit as u8);
+        let s = 1 << (bit as u8);
         if flag == PoolStatusBitFlag::Disable {
             self.status = self.status.bitor(s);
         } else {
-            let m = u8::from(255).bitxor(s);
+            let m = 255.bitxor(s);
             self.status = self.status.bitand(m);
         }
     }
 
     /// Get status by bit, if it is `noraml` status, return true
     pub fn get_status_by_bit(&self, bit: PoolStatusBitIndex) -> bool {
-        let status = u8::from(1) << (bit as u8);
+        let status = 1 << (bit as u8);
         self.status.bitand(status) == 0
     }
 
@@ -572,7 +571,7 @@ impl PoolState {
             max_tick_boundary =
                 TickArrayState::get_array_start_index(tick_math::MAX_TICK, self.tick_spacing);
             // find the next tick array start index
-            max_tick_boundary = max_tick_boundary + TickArrayState::tick_count(self.tick_spacing);
+            max_tick_boundary += TickArrayState::tick_count(self.tick_spacing);
         }
         if min_tick_boundary < tick_math::MIN_TICK {
             min_tick_boundary =
@@ -819,7 +818,7 @@ pub mod pool_test {
         new_pool.fee_growth_global_1_x64 = rand::random::<u128>();
         new_pool.bump = [Pubkey::find_program_address(
             &[
-                &POOL_SEED.as_bytes(),
+                POOL_SEED.as_bytes(),
                 new_pool.amm_config.as_ref(),
                 new_pool.token_mint_0.as_ref(),
                 new_pool.token_mint_1.as_ref(),
@@ -839,31 +838,28 @@ pub mod pool_test {
             let mut pool_state = PoolState::default();
             pool_state.tick_spacing = 10;
             pool_state.flip_tick_array_bit(None, -600).unwrap();
-            assert!(U1024(pool_state.tick_array_bitmap).bit(511) == true);
+            assert!(U1024(pool_state.tick_array_bitmap).bit(511));
 
             pool_state.flip_tick_array_bit(None, -1200).unwrap();
-            assert!(U1024(pool_state.tick_array_bitmap).bit(510) == true);
+            assert!(U1024(pool_state.tick_array_bitmap).bit(510));
 
             pool_state.flip_tick_array_bit(None, -1800).unwrap();
-            assert!(U1024(pool_state.tick_array_bitmap).bit(509) == true);
+            assert!(U1024(pool_state.tick_array_bitmap).bit(509));
 
             pool_state.flip_tick_array_bit(None, -38400).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-38400).unwrap())
-                    == true
             );
             pool_state.flip_tick_array_bit(None, -39000).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-39000).unwrap())
-                    == true
             );
             pool_state.flip_tick_array_bit(None, -307200).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(-307200).unwrap())
-                    == true
             );
         }
 
@@ -876,7 +872,6 @@ pub mod pool_test {
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(0).unwrap())
-                    == true
             );
 
             pool_state.flip_tick_array_bit(None, 600).unwrap();
@@ -884,21 +879,18 @@ pub mod pool_test {
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(600).unwrap())
-                    == true
             );
 
             pool_state.flip_tick_array_bit(None, 1200).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(1200).unwrap())
-                    == true
             );
 
             pool_state.flip_tick_array_bit(None, 38400).unwrap();
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(38400).unwrap())
-                    == true
             );
 
             pool_state.flip_tick_array_bit(None, 306600).unwrap();
@@ -906,7 +898,6 @@ pub mod pool_test {
             assert!(
                 U1024(pool_state.tick_array_bitmap)
                     .bit(pool_state.get_tick_array_offset(306600).unwrap())
-                    == true
             );
         }
 
@@ -915,21 +906,21 @@ pub mod pool_test {
             let mut pool_state = PoolState::default();
             pool_state.tick_spacing = 60;
             // -443580 is the min tick can use to open a position when tick_spacing is 60 due to MIN_TICK is -443636
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-443580]) == false);
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![-443580]));
             // 443580 is the min tick can use to open a position when tick_spacing is 60 due to MAX_TICK is 443636
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![443580]) == false);
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![443580]));
 
             pool_state.tick_spacing = 10;
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-307200]) == false);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-307201]) == true);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![307200]) == true);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![307199]) == false);
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![-307200]));
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-307201]));
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![307200]));
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![307199]));
 
             pool_state.tick_spacing = 1;
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-30720]) == false);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-30721]) == true);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![30720]) == true);
-            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![30719]) == false);
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![-30720]));
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![-30721]));
+            assert!(pool_state.is_overflow_default_tickarray_bitmap(vec![30720]));
+            assert!(!pool_state.is_overflow_default_tickarray_bitmap(vec![30719]));
         }
     }
 
@@ -940,55 +931,47 @@ pub mod pool_test {
         fn get_set_status_by_bit() {
             let mut pool_state = PoolState::default();
             pool_state.set_status(17); // 00010001
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::Swap),
-                false
+            assert!(
+                !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap)
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::OpenPositionOrIncreaseLiquidity),
-                false
+            assert!(
+                !pool_state.get_status_by_bit(PoolStatusBitIndex::OpenPositionOrIncreaseLiquidity)
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity),
-                true
+            assert!(
+                pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity)
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::CollectFee),
-                true
+            assert!(
+                pool_state.get_status_by_bit(PoolStatusBitIndex::CollectFee)
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::CollectReward),
-                true
+            assert!(
+                pool_state.get_status_by_bit(PoolStatusBitIndex::CollectReward)
             );
 
             // disable -> disable, nothing to change
             pool_state.set_status_by_bit(PoolStatusBitIndex::Swap, PoolStatusBitFlag::Disable);
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::Swap),
-                false
+            assert!(
+                !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap)
             );
 
             // disable -> enable
             pool_state.set_status_by_bit(PoolStatusBitIndex::Swap, PoolStatusBitFlag::Enable);
-            assert_eq!(pool_state.get_status_by_bit(PoolStatusBitIndex::Swap), true);
+            assert!(pool_state.get_status_by_bit(PoolStatusBitIndex::Swap));
 
             // enable -> enable, nothing to change
             pool_state.set_status_by_bit(
                 PoolStatusBitIndex::DecreaseLiquidity,
                 PoolStatusBitFlag::Enable,
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity),
-                true
+            assert!(
+                pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity)
             );
             // enable -> disable
             pool_state.set_status_by_bit(
                 PoolStatusBitIndex::DecreaseLiquidity,
                 PoolStatusBitFlag::Disable,
             );
-            assert_eq!(
-                pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity),
-                false
+            assert!(
+                !pool_state.get_status_by_bit(PoolStatusBitIndex::DecreaseLiquidity)
             );
         }
     }
@@ -1121,27 +1104,27 @@ pub mod pool_test {
             let (is_first_initilzied, start_index) = pool_state
                 .get_first_initialized_tick_array(&tick_array_bitmap_extension, true)
                 .unwrap();
-            assert!(is_first_initilzied == false);
+            assert!(!is_first_initilzied);
             assert!(start_index == -tick_spacing * TICK_ARRAY_SIZE * 513);
 
             let (is_first_initilzied, start_index) = pool_state
                 .get_first_initialized_tick_array(&tick_array_bitmap_extension, false)
                 .unwrap();
-            assert!(is_first_initilzied == false);
+            assert!(!is_first_initilzied);
             assert!(start_index == tick_spacing * TICK_ARRAY_SIZE * 511);
 
             pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 511;
             let (is_first_initilzied, start_index) = pool_state
                 .get_first_initialized_tick_array(&tick_array_bitmap_extension, true)
                 .unwrap();
-            assert!(is_first_initilzied == true);
+            assert!(is_first_initilzied);
             assert!(start_index == tick_spacing * TICK_ARRAY_SIZE * 511);
 
             pool_state.tick_current = tick_spacing * TICK_ARRAY_SIZE * 512;
             let (is_first_initilzied, start_index) = pool_state
                 .get_first_initialized_tick_array(&tick_array_bitmap_extension, true)
                 .unwrap();
-            assert!(is_first_initilzied == true);
+            assert!(is_first_initilzied);
             assert!(start_index == tick_spacing * TICK_ARRAY_SIZE * 512);
         }
 
@@ -1244,7 +1227,7 @@ pub mod pool_test {
                         true,
                     )
                     .unwrap();
-                assert!(start_index.is_none() == true);
+                assert!(start_index.is_none());
             }
 
             #[test]
@@ -1332,7 +1315,7 @@ pub mod pool_test {
                         false,
                     )
                     .unwrap();
-                assert!(start_index.is_none() == true);
+                assert!(start_index.is_none());
             }
 
             #[test]

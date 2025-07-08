@@ -79,8 +79,7 @@ impl InitializeRewardParam {
             return Err(ErrorCode::InvalidRewardInitParam.into());
         }
         let time_delta = self.end_time.checked_sub(self.open_time).unwrap();
-        if time_delta < reward_period_limit::MIN_REWARD_PERIOD
-            || time_delta > reward_period_limit::MAX_REWARD_PERIOD
+        if !(reward_period_limit::MIN_REWARD_PERIOD..=reward_period_limit::MAX_REWARD_PERIOD).contains(&time_delta)
         {
             return Err(ErrorCode::InvalidRewardPeriod.into());
         }
