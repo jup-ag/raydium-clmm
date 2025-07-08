@@ -28,6 +28,7 @@ const BIT_PRECISION: u32 = 16;
 /// # Arguments
 /// * `tick` - Price tick
 ///
+#[inline]
 pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Error> {
     let abs_tick = tick.abs() as u32;
     require!(abs_tick <= MAX_TICK as u32, ErrorCode::TickUpperOverflow);
@@ -124,6 +125,7 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Err
 /// Throws if sqrt_price_x64 < MIN_SQRT_RATIO or sqrt_price_x64 > MAX_SQRT_RATIO
 ///
 /// Formula: `i = log base(√1.0001) (√P)`
+#[inline]
 pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::error::Error> {
     // second inequality must be < because the price can never reach the price at the max tick
     require!(

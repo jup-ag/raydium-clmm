@@ -14,7 +14,28 @@ use anchor_lang::prelude::*;
 /// * `x` - The liquidity (L) before change
 /// * `y` - The delta (ΔL) by which liquidity should be changed
 ///
+#[inline]
 pub fn add_delta(x: u128, y: i128) -> Result<u128> {
+    // Fast path for small deltas that fit in i64
+    if y.abs() <= i64::MAX as i128 {
+        if y < 0 {
+            let delta = (-y) as u128;
+            if x >= delta {
+                return Ok(x - delta);
+            } else {
+                return Err(ErrorCode::LiquiditySubValueErr.into());
+            }
+        } else {
+            let delta = y as u128;
+            if let Some(result) = x.checked_add(delta) {
+                return Ok(result);
+            } else {
+                return Err(ErrorCode::LiquidityAddValueErr.into());
+            }
+        }
+    }
+    
+    // Fallback to original logic for larger values
     let z: u128;
     if y < 0 {
         z = x - u128::try_from(-y).map_err(|_| ErrorCode::CalculateOverflow)?;
@@ -163,6 +184,7 @@ pub fn get_liquidity_from_single_amount_1(
 ///
 /// * `Δx = L * (1 / √P_lower - 1 / √P_upper)`
 /// * i.e. `L * (√P_upper - √P_lower) / (√P_upper * √P_lower)`
+#[inline]
 pub fn get_delta_amount_0_unsigned(
     mut sqrt_ratio_a_x64: u128,
     mut sqrt_ratio_b_x64: u128,
@@ -200,6 +222,7 @@ pub fn get_delta_amount_0_unsigned(
 
 /// Gets the delta amount_1 for given liquidity and price range
 /// * `Δy = L (√P_upper - √P_lower)`
+#[inline]
 pub fn get_delta_amount_1_unsigned(
     mut sqrt_ratio_a_x64: u128,
     mut sqrt_ratio_b_x64: u128,

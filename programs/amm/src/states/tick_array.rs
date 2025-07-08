@@ -156,22 +156,59 @@ impl TickArrayState {
     }
 
     /// Base on swap directioin, return the first initialized tick in the tick array.
+    #[inline]
     pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<&TickState> {
         if zero_for_one {
+            // Optimized reverse iteration with unrolled loop for better performance
             let mut i = TICK_ARRAY_SIZE - 1;
+            while i >= 4 {
+                // Check 4 ticks at once to reduce branching
+                if self.ticks[i as usize].is_initialized() {
+                    return Ok(&self.ticks[i as usize]);
+                }
+                if self.ticks[(i - 1) as usize].is_initialized() {
+                    return Ok(&self.ticks[(i - 1) as usize]);
+                }
+                if self.ticks[(i - 2) as usize].is_initialized() {
+                    return Ok(&self.ticks[(i - 2) as usize]);
+                }
+                if self.ticks[(i - 3) as usize].is_initialized() {
+                    return Ok(&self.ticks[(i - 3) as usize]);
+                }
+                i -= 4;
+            }
+            // Handle remaining ticks
             while i >= 0 {
                 if self.ticks[i as usize].is_initialized() {
-                    return Ok(self.ticks.get(i as usize).unwrap());
+                    return Ok(&self.ticks[i as usize]);
                 }
-                i = i - 1;
+                i -= 1;
             }
         } else {
+            // Optimized forward iteration with unrolled loop
             let mut i = 0;
+            while i + 4 <= TICK_ARRAY_SIZE_USIZE {
+                // Check 4 ticks at once to reduce branching
+                if self.ticks[i].is_initialized() {
+                    return Ok(&self.ticks[i]);
+                }
+                if self.ticks[i + 1].is_initialized() {
+                    return Ok(&self.ticks[i + 1]);
+                }
+                if self.ticks[i + 2].is_initialized() {
+                    return Ok(&self.ticks[i + 2]);
+                }
+                if self.ticks[i + 3].is_initialized() {
+                    return Ok(&self.ticks[i + 3]);
+                }
+                i += 4;
+            }
+            // Handle remaining ticks
             while i < TICK_ARRAY_SIZE_USIZE {
                 if self.ticks[i].is_initialized() {
-                    return Ok(self.ticks.get(i).unwrap());
+                    return Ok(&self.ticks[i]);
                 }
-                i = i + 1;
+                i += 1;
             }
         }
         err!(ErrorCode::InvalidTickArray)
@@ -180,6 +217,7 @@ impl TickArrayState {
     /// Get next initialized tick in tick array, `current_tick_index` can be any tick index, in other words, `current_tick_index` not exactly a point in the tickarray,
     /// and current_tick_index % tick_spacing maybe not equal zero.
     /// If price move to left tick <= current_tick_index, or to right tick > current_tick_index
+    #[inline]
     pub fn next_initialized_tick(
         &self,
         current_tick_index: i32,

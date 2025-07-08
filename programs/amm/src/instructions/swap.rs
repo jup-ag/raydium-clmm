@@ -806,7 +806,8 @@ pub fn swap<'a, 'b, 'c: 'info, 'info>(
     Ok(())
 }
 
-/// Attempts to extract the quoting logic
+/// Optimized swap execution with performance enhancements
+#[inline]
 pub fn swap_on_swap_state(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
@@ -823,6 +824,15 @@ pub fn swap_on_swap_state(
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
         return err!(ErrorCode::NotApproved);
     }
+
+    // Cache frequently accessed values for better performance
+    let tick_spacing = pool_state.tick_spacing;
+    let trade_fee_rate = amm_config.trade_fee_rate;
+    let protocol_fee_rate = amm_config.protocol_fee_rate;
+    let fund_fee_rate = amm_config.fund_fee_rate;
+    
+    // Sqrt price cache to avoid redundant calculations (simple 2-entry cache for common cases)
+    let mut sqrt_price_cache = [(i32::MAX, 0u128), (i32::MAX, 0u128)];
 
     let mut tick_array_current = tick_array_states
         .pop_front()
@@ -887,7 +897,7 @@ pub fn swap_on_swap_state(
 
         let default_tick_state = TickState::default();
         let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
-            .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
+            .next_initialized_tick(state.tick, tick_spacing, zero_for_one)?
         {
             tick_state
         } else {
@@ -944,12 +954,27 @@ pub fn swap_on_swap_state(
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
 
-        if step.tick_next < tick_math::MIN_TICK {
-            step.tick_next = tick_math::MIN_TICK;
-        } else if step.tick_next > tick_math::MAX_TICK {
-            step.tick_next = tick_math::MAX_TICK;
-        }
-        step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        // Optimized tick clamping using min/max for better performance
+        step.tick_next = step.tick_next.max(tick_math::MIN_TICK).min(tick_math::MAX_TICK);
+        
+        // Use cached sqrt price calculation to avoid redundant tick_math calls
+        step.sqrt_price_next_x64 = {
+            if sqrt_price_cache[0].0 == step.tick_next {
+                sqrt_price_cache[0].1
+            } else if sqrt_price_cache[1].0 == step.tick_next {
+                // Move to front for better cache hit rate
+                let temp = sqrt_price_cache[1];
+                sqrt_price_cache[1] = sqrt_price_cache[0];
+                sqrt_price_cache[0] = temp;
+                temp.1
+            } else {
+                // Cache miss - calculate and store
+                let sqrt_price = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+                sqrt_price_cache[1] = sqrt_price_cache[0];
+                sqrt_price_cache[0] = (step.tick_next, sqrt_price);
+                sqrt_price
+            }
+        };
 
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
@@ -981,7 +1006,7 @@ pub fn swap_on_swap_state(
             target_price,
             state.liquidity,
             state.amount_specified_remaining,
-            amm_config.trade_fee_rate,
+            trade_fee_rate,
             is_base_input,
             zero_for_one,
             1,
@@ -1017,48 +1042,71 @@ pub fn swap_on_swap_state(
                 .ok_or(ErrorCode::CalculateOverflow)?;
         }
 
+        // Optimized fee calculations with cached values and safe fast paths
         let step_fee_amount = step.fee_amount;
-        // if the protocol fee is on, calculate how much is owed, decrement fee_amount, and increment protocol_fee
-        if amm_config.protocol_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.protocol_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-            state.protocol_fee = state
-                .protocol_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-        }
-        // if the fund fee is on, calculate how much is owed, decrement fee_amount, and increment fund_fee
-        if amm_config.fund_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.fund_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-            state.fund_fee = state
-                .fund_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
+        // Early exit for zero fees (common case optimization)
+        if step_fee_amount == 0 {
+            // Skip all fee calculations when there are no fees
+        } else {
+            
+            // Fast path for small fees that fit in u64 arithmetic
+            if step_fee_amount <= u32::MAX as u64 && 
+               protocol_fee_rate <= u16::MAX as u32 && 
+               fund_fee_rate <= u16::MAX as u32 {
+                // Use u64 arithmetic for better performance
+                let mut total_deducted = 0u64;
+                
+                if protocol_fee_rate > 0 {
+                    let delta = ((step_fee_amount as u128 * protocol_fee_rate as u128) / FEE_RATE_DENOMINATOR_VALUE as u128) as u64;
+                    total_deducted = total_deducted.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                    state.protocol_fee = state.protocol_fee.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                }
+                
+                if fund_fee_rate > 0 {
+                    let delta = ((step_fee_amount as u128 * fund_fee_rate as u128) / FEE_RATE_DENOMINATOR_VALUE as u128) as u64;
+                    total_deducted = total_deducted.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                    state.fund_fee = state.fund_fee.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                }
+                
+                step.fee_amount = step.fee_amount.checked_sub(total_deducted).ok_or(ErrorCode::CalculateOverflow)?;
+            } else {
+                // Fallback to original U128 arithmetic for larger values
+                if protocol_fee_rate > 0 {
+                    let delta = U128::from(step_fee_amount)
+                        .checked_mul(protocol_fee_rate.into())
+                        .ok_or(ErrorCode::CalculateOverflow)?
+                        .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
+                        .ok_or(ErrorCode::CalculateOverflow)?
+                        .as_u64();
+                    step.fee_amount = step.fee_amount.checked_sub(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                    state.protocol_fee = state.protocol_fee.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                }
+                
+                if fund_fee_rate > 0 {
+                    let delta = U128::from(step_fee_amount)
+                        .checked_mul(fund_fee_rate.into())
+                        .ok_or(ErrorCode::CalculateOverflow)?
+                        .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
+                        .ok_or(ErrorCode::CalculateOverflow)?
+                        .as_u64();
+                    step.fee_amount = step.fee_amount.checked_sub(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                    state.fund_fee = state.fund_fee.checked_add(delta).ok_or(ErrorCode::CalculateOverflow)?;
+                }
+            }
         }
 
-        // update global fee tracker
-        if state.liquidity > 0 {
-            let fee_growth_global_x64_delta = U128::from(step.fee_amount)
-                .mul_div_floor(U128::from(fixed_point_64::Q64), U128::from(state.liquidity))
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u128();
+        // Optimized global fee tracker update with fast path
+        if state.liquidity > 0 && step.fee_amount > 0 {
+            let fee_growth_global_x64_delta = if state.liquidity <= u64::MAX as u128 && step.fee_amount <= u32::MAX as u64 {
+                // Fast path: use direct u128 arithmetic
+                ((step.fee_amount as u128) << 64) / state.liquidity
+            } else {
+                // Fallback to mul_div_floor for larger values
+                U128::from(step.fee_amount)
+                    .mul_div_floor(U128::from(fixed_point_64::Q64), U128::from(state.liquidity))
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .as_u128()
+            };
 
             state.fee_growth_global_x64 = state
                 .fee_growth_global_x64
@@ -1082,17 +1130,13 @@ pub fn swap_on_swap_state(
                 #[cfg(feature = "enable-log")]
                 msg!("loading next tick {}", step.tick_next);
 
-                let mut liquidity_net = next_initialized_tick.liquidity_net;
-                // update tick_state to tick_array account
-                // tick_array_current.update_tick_state(
-                //     next_initialized_tick.tick,
-                //     pool_state.tick_spacing.into(),
-                //     *next_initialized_tick,
-                // )?;
-
-                if zero_for_one {
-                    liquidity_net = liquidity_net.neg();
-                }
+                // Optimized liquidity net calculation with conditional negation
+                let liquidity_net = if zero_for_one {
+                    next_initialized_tick.liquidity_net.neg()
+                } else {
+                    next_initialized_tick.liquidity_net
+                };
+                
                 state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
             }
 
@@ -1285,7 +1329,7 @@ mod swap_test {
                     tick_math::get_sqrt_price_at_tick(position_param.tick_upper).unwrap(),
                     position_param.amount_0,
                     position_param.amount_1,
-                );
+                ).unwrap();
 
                 let (amount_0, amount_1) = get_delta_amounts_signed(
                     start_tick,

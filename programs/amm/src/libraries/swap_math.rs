@@ -15,6 +15,7 @@ pub struct SwapStep {
 }
 
 /// Computes the result of swapping some amount in, or amount out, given the parameters of the swap
+#[inline]
 pub fn compute_swap_step(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,
@@ -28,14 +29,20 @@ pub fn compute_swap_step(
     // let exact_in = amount_remaining >= 0;
     let mut swap_step = SwapStep::default();
     if is_base_input {
-        // round up amount_in
-        // In exact input case, amount_remaining is positive
-        let amount_remaining_less_fee = (amount_remaining as u64)
-            .mul_div_floor(
-                (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
-                u64::from(FEE_RATE_DENOMINATOR_VALUE),
-            )
-            .ok_or(ErrorCode::CalculateOverflow)?;
+        // Optimized fee calculation with fast path for common cases
+        let amount_remaining_less_fee = if amount_remaining <= u32::MAX as u64 && fee_rate <= u16::MAX as u32 {
+            // Fast path: use direct arithmetic for small values
+            let fee_multiplier = FEE_RATE_DENOMINATOR_VALUE - fee_rate;
+            ((amount_remaining as u128 * fee_multiplier as u128) / FEE_RATE_DENOMINATOR_VALUE as u128) as u64
+        } else {
+            // Fallback to mul_div_floor for larger values
+            (amount_remaining as u64)
+                .mul_div_floor(
+                    (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
+                    u64::from(FEE_RATE_DENOMINATOR_VALUE),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+        };
 
         let amount_in = calculate_amount_in_range(
             sqrt_price_current_x64,
@@ -157,6 +164,7 @@ pub fn compute_swap_step(
 /// The amount maybe overflow of u64 due to the `sqrt_price_target_x64` maybe unreasonable.
 /// Therefore, this situation needs to be handled in `compute_swap_step` to recalculate the price that can be reached based on the amount.
 #[cfg(not(test))]
+#[inline]
 fn calculate_amount_in_range(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,

@@ -27,6 +27,7 @@ use super::{fixed_point_64, U256};
 /// √P' = √P * L / L'
 /// √P' = √P * L / (L + Δx*√P)
 ///
+#[inline]
 pub fn get_next_sqrt_price_from_amount_0_rounding_up(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -84,6 +85,7 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
 ///
 /// * `√P' = √P + Δy / L`
 ///
+#[inline]
 pub fn get_next_sqrt_price_from_amount_1_rounding_down(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -104,6 +106,7 @@ pub fn get_next_sqrt_price_from_amount_1_rounding_down(
 
 /// Gets the next sqrt price given an input amount of token_0 or token_1
 /// Throws if price or liquidity are 0, or if the next price is out of bounds
+#[inline]
 pub fn get_next_sqrt_price_from_input(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -125,6 +128,7 @@ pub fn get_next_sqrt_price_from_input(
 ///
 /// Throws if price or liquidity are 0 or the next price is out of bounds
 ///
+#[inline]
 pub fn get_next_sqrt_price_from_output(
     sqrt_price_x64: u128,
     liquidity: u128,
