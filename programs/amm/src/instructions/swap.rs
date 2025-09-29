@@ -829,6 +829,8 @@ pub fn swap_on_swap_state(
 
     // Hot-path precomputations to avoid repeated work in the loop
     let tick_spacing = pool_state.tick_spacing;
+    let tick_spacing_i32: i32 = i32::from(tick_spacing);
+    let ticks_per_array: i32 = crate::states::tick_array::TICK_ARRAY_SIZE * tick_spacing_i32;
     let has_protocol_fee = amm_config.protocol_fee_rate > 0;
     let has_fund_fee = amm_config.fund_fee_rate > 0;
     let denom_u128 = U128::from(FEE_RATE_DENOMINATOR_VALUE);
@@ -837,9 +839,13 @@ pub fn swap_on_swap_state(
     let protocol_rate_u128 = U128::from(amm_config.protocol_fee_rate);
     let fund_rate_u128 = U128::from(amm_config.fund_fee_rate);
 
+    let mut cached_tick_next: i32 = i32::MIN;
+    let mut cached_sqrt_price_next_x64: u128 = 0;
+
     let mut tick_array_current = tick_array_states
         .pop_front()
         .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
+    let mut current_start = tick_array_current.start_tick_index;
     // check tick_array account is owned by the pool
     // require_keys_eq!(tick_array_current.pool_id, pool_state.key());
 
@@ -885,6 +891,9 @@ pub fn swap_on_swap_state(
     // This allows O(1) bit scans instead of O(60) linear scans per step.
     #[inline(always)]
     fn build_initialized_mask(tick_array: &TickArrayState) -> u64 {
+        if tick_array.initialized_tick_count == 0 {
+            return 0;
+        }
         let mut mask: u64 = 0;
         let mut i: usize = 0;
         while i < crate::states::tick_array::TICK_ARRAY_SIZE_USIZE {
@@ -896,8 +905,8 @@ pub fn swap_on_swap_state(
         mask
     }
 
-    let tick_spacing_i32: i32 = i32::from(tick_spacing);
     let mut current_array_mask: u64 = build_initialized_mask(tick_array_current);
+    let mut liquidity_u128 = U128::from(state.liquidity);
 
     while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
         #[cfg(feature = "enable-log")]
@@ -920,50 +929,54 @@ pub fn swap_on_swap_state(
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
         // Fast path: locate next initialized tick using bit scans within the current array.
-        let mut next_initialized_tick = {
-            let current_start = tick_array_current.start_tick_index;
-            if TickArrayState::get_array_start_index(state.tick, tick_spacing) != current_start {
-                None
-            } else {
-                let mut offset_in_array = (state.tick - current_start) / tick_spacing_i32;
-                if zero_for_one {
-                    if offset_in_array < 0 {
-                        offset_in_array = 0;
-                    } else if offset_in_array >= crate::states::tick_array::TICK_ARRAY_SIZE {
-                        offset_in_array = crate::states::tick_array::TICK_ARRAY_SIZE - 1;
-                    }
-                    let upto = (offset_in_array as u32).saturating_add(1);
-                    let search_mask = if upto >= 64 {
-                        current_array_mask
-                    } else {
-                        current_array_mask & ((1u64 << upto) - 1)
-                    };
-                    if search_mask != 0 {
-                        let idx = 63u32.saturating_sub(search_mask.leading_zeros());
-                        Some(&tick_array_current.ticks[idx as usize])
-                    } else {
-                        None
-                    }
+        let mut chosen_idx_for_mask: Option<u32> = None;
+        let array_upper_bound = current_start.saturating_add(ticks_per_array);
+        let mut next_initialized_tick = if current_array_mask == 0
+            || state.tick < current_start
+            || state.tick >= array_upper_bound
+        {
+            None
+        } else {
+            let mut offset_in_array = (state.tick - current_start) / tick_spacing_i32;
+            if zero_for_one {
+                if offset_in_array < 0 {
+                    offset_in_array = 0;
+                } else if offset_in_array >= crate::states::tick_array::TICK_ARRAY_SIZE {
+                    offset_in_array = crate::states::tick_array::TICK_ARRAY_SIZE - 1;
+                }
+                let upto = (offset_in_array as u32).saturating_add(1);
+                let search_mask = if upto >= 64 {
+                    current_array_mask
                 } else {
-                    let mut start_bit = offset_in_array + 1;
-                    if start_bit < 0 {
-                        start_bit = 0;
-                    } else if start_bit > crate::states::tick_array::TICK_ARRAY_SIZE {
-                        start_bit = crate::states::tick_array::TICK_ARRAY_SIZE;
-                    }
-                    let search_mask = if start_bit >= 64 {
-                        0u64
-                    } else if start_bit <= 0 {
-                        current_array_mask
-                    } else {
-                        current_array_mask & (!((1u64 << (start_bit as u32)) - 1))
-                    };
-                    if search_mask != 0 {
-                        let idx = search_mask.trailing_zeros();
-                        Some(&tick_array_current.ticks[idx as usize])
-                    } else {
-                        None
-                    }
+                    current_array_mask & ((1u64 << upto) - 1)
+                };
+                if search_mask != 0 {
+                    let idx = 63u32 - search_mask.leading_zeros();
+                    chosen_idx_for_mask = Some(idx);
+                    Some(&tick_array_current.ticks[idx as usize])
+                } else {
+                    None
+                }
+            } else {
+                let mut start_bit = offset_in_array + 1;
+                if start_bit < 0 {
+                    start_bit = 0;
+                } else if start_bit > crate::states::tick_array::TICK_ARRAY_SIZE {
+                    start_bit = crate::states::tick_array::TICK_ARRAY_SIZE;
+                }
+                let search_mask = if start_bit >= 64 {
+                    0u64
+                } else if start_bit <= 0 {
+                    current_array_mask
+                } else {
+                    current_array_mask & (!((1u64 << (start_bit as u32)) - 1))
+                };
+                if search_mask != 0 {
+                    let idx = search_mask.trailing_zeros();
+                    chosen_idx_for_mask = Some(idx);
+                    Some(&tick_array_current.ticks[idx as usize])
+                } else {
+                    None
                 }
             }
         };
@@ -971,10 +984,19 @@ pub fn swap_on_swap_state(
             next_initialized_tick = if let Some(tick_state) =
                 tick_array_current.next_initialized_tick(state.tick, tick_spacing, zero_for_one)?
             {
+                let idx_calc = (tick_state.tick - current_start) / tick_spacing_i32;
+                if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                    chosen_idx_for_mask = Some(idx_calc as u32);
+                }
                 Some(tick_state)
             } else if !is_match_pool_current_tick_array {
                 is_match_pool_current_tick_array = true;
-                Some(tick_array_current.first_initialized_tick(zero_for_one)?)
+                let first = tick_array_current.first_initialized_tick(zero_for_one)?;
+                let idx_calc = (first.tick - current_start) / tick_spacing_i32;
+                if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                    chosen_idx_for_mask = Some(idx_calc as u32);
+                }
+                Some(first)
             } else {
                 None
             };
@@ -1000,6 +1022,7 @@ pub fn swap_on_swap_state(
             tick_array_current = tick_array_states
                 .pop_front()
                 .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
+            current_start = tick_array_current.start_tick_index;
             // Recompute the mask for the new array
             current_array_mask = build_initialized_mask(tick_array_current);
 
@@ -1024,6 +1047,12 @@ pub fn swap_on_swap_state(
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
             next_initialized_tick = first_initialized_tick;
+            let idx_calc = (first_initialized_tick.tick - current_start) / tick_spacing_i32;
+            if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                chosen_idx_for_mask = Some(idx_calc as u32);
+            } else {
+                chosen_idx_for_mask = None;
+            }
         }
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
@@ -1033,7 +1062,11 @@ pub fn swap_on_swap_state(
         } else if step.tick_next > tick_math::MAX_TICK {
             step.tick_next = tick_math::MAX_TICK;
         }
-        step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        if cached_tick_next != step.tick_next {
+            cached_tick_next = step.tick_next;
+            cached_sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        }
+        step.sqrt_price_next_x64 = cached_sqrt_price_next_x64;
 
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
@@ -1150,7 +1183,7 @@ pub fn swap_on_swap_state(
         // update global fee tracker
         if state.liquidity > 0 {
             let fee_growth_global_x64_delta = U128::from(step.fee_amount)
-                .mul_div_floor(q64_u128, U128::from(state.liquidity))
+                .mul_div_floor(q64_u128, liquidity_u128)
                 .ok_or(ErrorCode::CalculateOverflow)?
                 .as_u128();
 
@@ -1188,6 +1221,10 @@ pub fn swap_on_swap_state(
                     liquidity_net = liquidity_net.neg();
                 }
                 state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
+                liquidity_u128 = U128::from(state.liquidity);
+                if let Some(bit_idx) = chosen_idx_for_mask {
+                    current_array_mask &= !(1u64 << bit_idx);
+                }
             }
 
             state.tick = if zero_for_one {
