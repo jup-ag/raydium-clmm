@@ -11,7 +11,7 @@ pub trait UnsafeMathTrait {
 
 impl UnsafeMathTrait for u64 {
     fn div_rounding_up(x: Self, y: Self) -> Self {
-        x / y + ((x % y > 0) as u64)
+        x / y + (!x.is_multiple_of(y) as u64)
     }
 }
 

@@ -143,7 +143,8 @@ impl TickArrayState {
     }
 
     /// Get tick's offset in current tick array, tick must be include in tick array， otherwise throw an error
-    fn get_tick_offset_in_array(self, tick_index: i32, tick_spacing: u16) -> Result<usize> {
+    #[inline(always)]
+    fn get_tick_offset_in_array(&self, tick_index: i32, tick_spacing: u16) -> Result<usize> {
         let start_tick_index = TickArrayState::get_array_start_index(tick_index, tick_spacing);
         require_eq!(
             start_tick_index,
@@ -156,6 +157,7 @@ impl TickArrayState {
     }
 
     /// Base on swap directioin, return the first initialized tick in the tick array.
+    #[inline(always)]
     pub fn first_initialized_tick(&self, zero_for_one: bool) -> Result<&TickState> {
         if zero_for_one {
             let mut i = TICK_ARRAY_SIZE - 1;
@@ -163,7 +165,7 @@ impl TickArrayState {
                 if self.ticks[i as usize].is_initialized() {
                     return Ok(self.ticks.get(i as usize).unwrap());
                 }
-                i = i - 1;
+                i -= 1;
             }
         } else {
             let mut i = 0;
@@ -171,7 +173,7 @@ impl TickArrayState {
                 if self.ticks[i].is_initialized() {
                     return Ok(self.ticks.get(i).unwrap());
                 }
-                i = i + 1;
+                i += 1;
             }
         }
         err!(ErrorCode::InvalidTickArray)
@@ -180,6 +182,7 @@ impl TickArrayState {
     /// Get next initialized tick in tick array, `current_tick_index` can be any tick index, in other words, `current_tick_index` not exactly a point in the tickarray,
     /// and current_tick_index % tick_spacing maybe not equal zero.
     /// If price move to left tick <= current_tick_index, or to right tick > current_tick_index
+    #[inline(always)]
     pub fn next_initialized_tick(
         &self,
         current_tick_index: i32,
@@ -199,15 +202,15 @@ impl TickArrayState {
                 if self.ticks[offset_in_array as usize].is_initialized() {
                     return Ok(self.ticks.get(offset_in_array as usize));
                 }
-                offset_in_array = offset_in_array - 1;
+                offset_in_array -= 1;
             }
         } else {
-            offset_in_array = offset_in_array + 1;
+            offset_in_array += 1;
             while offset_in_array < TICK_ARRAY_SIZE {
                 if self.ticks[offset_in_array as usize].is_initialized() {
                     return Ok(self.ticks.get(offset_in_array as usize));
                 }
-                offset_in_array = offset_in_array + 1;
+                offset_in_array += 1;
             }
         }
         Ok(None)
@@ -228,7 +231,7 @@ impl TickArrayState {
         let ticks_in_array = TickArrayState::tick_count(tick_spacing);
         let mut start = tick_index / ticks_in_array;
         if tick_index < 0 && tick_index % ticks_in_array != 0 {
-            start = start - 1
+            start -= 1
         }
         start * ticks_in_array
     }
@@ -375,14 +378,15 @@ impl TickState {
         self.reward_growths_outside_x64 = [0; REWARD_NUM];
     }
 
-    pub fn is_initialized(self) -> bool {
+    #[inline(always)]
+    pub fn is_initialized(&self) -> bool {
         self.liquidity_gross != 0
     }
 
     /// Common checks for a valid tick input.
     /// A tick is valid if it lies within tick boundaries
     pub fn check_is_out_of_boundary(tick: i32) -> bool {
-        tick < tick_math::MIN_TICK || tick > tick_math::MAX_TICK
+        !(tick_math::MIN_TICK..=tick_math::MAX_TICK).contains(&tick)
     }
 }
 

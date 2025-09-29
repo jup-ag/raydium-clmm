@@ -29,7 +29,7 @@ const BIT_PRECISION: u32 = 16;
 /// * `tick` - Price tick
 ///
 pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Error> {
-    let abs_tick = tick.abs() as u32;
+    let abs_tick = tick.unsigned_abs();
     require!(abs_tick <= MAX_TICK as u32, ErrorCode::TickUpperOverflow);
 
     // i = 0
@@ -127,7 +127,7 @@ pub fn get_sqrt_price_at_tick(tick: i32) -> Result<u128, anchor_lang::error::Err
 pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::error::Error> {
     // second inequality must be < because the price can never reach the price at the max tick
     require!(
-        sqrt_price_x64 >= MIN_SQRT_PRICE_X64 && sqrt_price_x64 < MAX_SQRT_PRICE_X64,
+        (MIN_SQRT_PRICE_X64..MAX_SQRT_PRICE_X64).contains(&sqrt_price_x64),
         ErrorCode::SqrtPriceX64
     );
 
@@ -152,7 +152,7 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::
 
     while bit > 0 && precision < BIT_PRECISION {
         r *= r;
-        let is_r_more_than_two = r >> 127 as u32;
+        let is_r_more_than_two = r >> 127_u32;
         r >>= 63 + is_r_more_than_two;
         log2p_fraction_x64 += bit * is_r_more_than_two as i128;
         bit >>= 1;

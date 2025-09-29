@@ -117,9 +117,9 @@ impl TickArrayBitmapExtension {
         let tick_array_bitmap = U512(tick_array_bitmap);
         let mask = U512::one() << tick_array_offset_in_bitmap;
         if tick_array_start_index < 0 {
-            self.negative_tick_array_bitmap[offset as usize] = tick_array_bitmap.bitxor(mask).0;
+            self.negative_tick_array_bitmap[offset] = tick_array_bitmap.bitxor(mask).0;
         } else {
-            self.positive_tick_array_bitmap[offset as usize] = tick_array_bitmap.bitxor(mask).0;
+            self.positive_tick_array_bitmap[offset] = tick_array_bitmap.bitxor(mask).0;
         }
         Ok(())
     }
@@ -185,10 +185,10 @@ impl TickArrayBitmapExtension {
             if next_bit.is_some() {
                 let next_array_start_index = next_tick_array_start_index
                     - i32::from(next_bit.unwrap()) * TickArrayState::tick_count(tick_spacing);
-                return (true, next_array_start_index);
+                (true, next_array_start_index)
             } else {
                 // not found til to the end
-                return (false, bitmap_min_tick_boundary);
+                (false, bitmap_min_tick_boundary)
             }
         } else {
             // tick from lower to upper
@@ -203,13 +203,13 @@ impl TickArrayBitmapExtension {
             if next_bit.is_some() {
                 let next_array_start_index = next_tick_array_start_index
                     + i32::from(next_bit.unwrap()) * TickArrayState::tick_count(tick_spacing);
-                return (true, next_array_start_index);
+                (true, next_array_start_index)
             } else {
                 // not found til to the end
-                return (
+                (
                     false,
                     bitmap_max_tick_boundary - TickArrayState::tick_count(tick_spacing),
-                );
+                )
             }
         }
     }

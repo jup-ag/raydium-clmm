@@ -67,7 +67,7 @@ pub fn check_current_tick_array_is_initialized(
         return Ok((true, (compressed - 512) * multiplier));
     }
     // the current bit is not initialized
-    return Ok((false, (compressed - 512) * multiplier));
+    Ok((false, (compressed - 512) * multiplier))
 }
 
 pub fn next_initialized_tick_array_start_index(
