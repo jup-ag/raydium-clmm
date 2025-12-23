@@ -195,7 +195,7 @@ pub fn get_delta_amount_0_unsigned(
     if result > U256::from(u64::MAX) {
         return Err(ErrorCode::MaxTokenOverflow.into());
     }
-    return Ok(result.as_u64());
+    Ok(result.as_u64())
 }
 
 /// Gets the delta amount_1 for given liquidity and price range
@@ -226,7 +226,7 @@ pub fn get_delta_amount_1_unsigned(
     if result > U256::from(u64::MAX) {
         return Err(ErrorCode::MaxTokenOverflow.into());
     }
-    return Ok(result.as_u64());
+    Ok(result.as_u64())
 }
 
 /// Helper function to get signed delta amount_0 for given liquidity and price range

@@ -189,7 +189,7 @@ pub fn swap_internal<'b, 'info>(
     require_keys_eq!(observation_state.pool_id, pool_state.key());
 
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
-        pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
+        pool_state.get_first_initialized_tick_array(tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
     let mut tick_array_current = tick_array_states.pop_front().unwrap();
@@ -213,6 +213,10 @@ pub fn swap_internal<'b, 'info>(
 
     // continue swapping as long as we haven't used the entire input/output and haven't
     // reached the price limit
+    // Cache sqrt(price) for the current step.tick_next to avoid repeated tick->price conversions
+    let mut cached_tick_next: i32 = i32::MIN;
+    let mut cached_sqrt_price_next_x64: u128 = 0;
+
     while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
         #[cfg(feature = "enable-log")]
         msg!(
@@ -237,13 +241,11 @@ pub fn swap_internal<'b, 'info>(
             .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
         {
             Box::new(*tick_state)
+        } else if !is_match_pool_current_tick_array {
+            is_match_pool_current_tick_array = true;
+            Box::new(*tick_array_current.first_initialized_tick(zero_for_one)?)
         } else {
-            if !is_match_pool_current_tick_array {
-                is_match_pool_current_tick_array = true;
-                Box::new(*tick_array_current.first_initialized_tick(zero_for_one)?)
-            } else {
-                Box::new(TickState::default())
-            }
+            Box::new(TickState::default())
         };
         #[cfg(feature = "enable-log")]
         msg!(
@@ -255,7 +257,7 @@ pub fn swap_internal<'b, 'info>(
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
-                    &tickarray_bitmap_extension,
+                    tickarray_bitmap_extension,
                     current_vaild_tick_array_start_index,
                     zero_for_one,
                 )?;
@@ -283,7 +285,11 @@ pub fn swap_internal<'b, 'info>(
         } else if step.tick_next > tick_math::MAX_TICK {
             step.tick_next = tick_math::MAX_TICK;
         }
-        step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        if cached_tick_next != step.tick_next {
+            cached_tick_next = step.tick_next;
+            cached_sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        }
+        step.sqrt_price_next_x64 = cached_sqrt_price_next_x64;
 
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
@@ -423,7 +429,7 @@ pub fn swap_internal<'b, 'info>(
                 // update tick_state to tick_array account
                 tick_array_current.update_tick_state(
                     next_initialized_tick.tick,
-                    pool_state.tick_spacing.into(),
+                    pool_state.tick_spacing,
                     *next_initialized_tick,
                 )?;
 
@@ -603,7 +609,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         tick_array_states.push_back(ctx.tick_array_state.load_mut()?);
 
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
-        for account_info in remaining_accounts.into_iter() {
+        for account_info in remaining_accounts.iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
                 tickarray_bitmap_extension = Some(
                     *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
@@ -616,7 +622,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         }
 
         (amount_0, amount_1) = swap_internal(
-            &ctx.amm_config,
+            ctx.amm_config,
             pool_state,
             tick_array_states,
             &mut ctx.observation_state.load_mut()?,
@@ -681,7 +687,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
         }
         // x -> y，transfer y token from pool vault to user.
         transfer_from_pool_vault_to_user(
-            &ctx.pool_state,
+            ctx.pool_state,
             &vault_1,
             &token_account_1,
             None,
@@ -704,7 +710,7 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             ctx.pool_state.load_mut()?.set_status(255);
         }
         transfer_from_pool_vault_to_user(
-            &ctx.pool_state,
+            ctx.pool_state,
             &vault_0,
             &token_account_0,
             None,
@@ -744,12 +750,10 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
             } else {
                 require_eq!(amount_specified, amount_1);
             }
+        } else if zero_for_one {
+            require_eq!(amount_specified, amount_1);
         } else {
-            if zero_for_one {
-                require_eq!(amount_specified, amount_1);
-            } else {
-                require_eq!(amount_specified, amount_0);
-            }
+            require_eq!(amount_specified, amount_0);
         }
     }
 
@@ -823,14 +827,30 @@ pub fn swap_on_swap_state(
         return err!(ErrorCode::NotApproved);
     }
 
+    // Hot-path precomputations to avoid repeated work in the loop
+    let tick_spacing = pool_state.tick_spacing;
+    let tick_spacing_i32: i32 = i32::from(tick_spacing);
+    let ticks_per_array: i32 = crate::states::tick_array::TICK_ARRAY_SIZE * tick_spacing_i32;
+    let has_protocol_fee = amm_config.protocol_fee_rate > 0;
+    let has_fund_fee = amm_config.fund_fee_rate > 0;
+    let denom_u128 = U128::from(FEE_RATE_DENOMINATOR_VALUE);
+    let q64_u128 = U128::from(fixed_point_64::Q64);
+    // Precompute fee rates as U128 to avoid converting every iteration
+    let protocol_rate_u128 = U128::from(amm_config.protocol_fee_rate);
+    let fund_rate_u128 = U128::from(amm_config.fund_fee_rate);
+
+    let mut cached_tick_next: i32 = i32::MIN;
+    let mut cached_sqrt_price_next_x64: u128 = 0;
+
     let mut tick_array_current = tick_array_states
         .pop_front()
         .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
+    let mut current_start = tick_array_current.start_tick_index;
     // check tick_array account is owned by the pool
     // require_keys_eq!(tick_array_current.pool_id, pool_state.key());
 
     let (mut is_match_pool_current_tick_array, first_vaild_tick_array_start_index) =
-        pool_state.get_first_initialized_tick_array(&tickarray_bitmap_extension, zero_for_one)?;
+        pool_state.get_first_initialized_tick_array(tickarray_bitmap_extension, zero_for_one)?;
     let mut current_vaild_tick_array_start_index = first_vaild_tick_array_start_index;
 
     // Unecessary validation for quote estimation
@@ -864,6 +884,30 @@ pub fn swap_on_swap_state(
 
     // continue swapping as long as we haven't used the entire input/output and haven't
     // reached the price limit
+    // Reuse a default tick state to avoid re-initializing each loop
+    let default_tick_state = TickState::default();
+
+    // Build a 60-bit mask representing initialized ticks within the current array.
+    // This allows O(1) bit scans instead of O(60) linear scans per step.
+    #[inline(always)]
+    fn build_initialized_mask(tick_array: &TickArrayState) -> u64 {
+        if tick_array.initialized_tick_count == 0 {
+            return 0;
+        }
+        let mut mask: u64 = 0;
+        let mut i: usize = 0;
+        while i < crate::states::tick_array::TICK_ARRAY_SIZE_USIZE {
+            if tick_array.ticks[i].is_initialized() {
+                mask |= 1u64 << i;
+            }
+            i += 1;
+        }
+        mask
+    }
+
+    let mut current_array_mask: u64 = build_initialized_mask(tick_array_current);
+    let mut liquidity_u128 = U128::from(state.liquidity);
+
     while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
         #[cfg(feature = "enable-log")]
         msg!(
@@ -884,19 +928,80 @@ pub fn swap_on_swap_state(
         let mut step = StepComputations::default();
         step.sqrt_price_start_x64 = state.sqrt_price_x64;
 
-        let default_tick_state = TickState::default();
-        let mut next_initialized_tick = if let Some(tick_state) = tick_array_current
-            .next_initialized_tick(state.tick, pool_state.tick_spacing, zero_for_one)?
+        // Fast path: locate next initialized tick using bit scans within the current array.
+        let mut chosen_idx_for_mask: Option<u32> = None;
+        let array_upper_bound = current_start.saturating_add(ticks_per_array);
+        let mut next_initialized_tick = if current_array_mask == 0
+            || state.tick < current_start
+            || state.tick >= array_upper_bound
         {
-            tick_state
+            None
         } else {
-            if !is_match_pool_current_tick_array {
-                is_match_pool_current_tick_array = true;
-                tick_array_current.first_initialized_tick(zero_for_one)?
+            let mut offset_in_array = (state.tick - current_start) / tick_spacing_i32;
+            if zero_for_one {
+                if offset_in_array < 0 {
+                    offset_in_array = 0;
+                } else if offset_in_array >= crate::states::tick_array::TICK_ARRAY_SIZE {
+                    offset_in_array = crate::states::tick_array::TICK_ARRAY_SIZE - 1;
+                }
+                let upto = (offset_in_array as u32).saturating_add(1);
+                let search_mask = if upto >= 64 {
+                    current_array_mask
+                } else {
+                    current_array_mask & ((1u64 << upto) - 1)
+                };
+                if search_mask != 0 {
+                    let idx = 63u32 - search_mask.leading_zeros();
+                    chosen_idx_for_mask = Some(idx);
+                    Some(&tick_array_current.ticks[idx as usize])
+                } else {
+                    None
+                }
             } else {
-                &default_tick_state
+                let mut start_bit = offset_in_array + 1;
+                if start_bit < 0 {
+                    start_bit = 0;
+                } else if start_bit > crate::states::tick_array::TICK_ARRAY_SIZE {
+                    start_bit = crate::states::tick_array::TICK_ARRAY_SIZE;
+                }
+                let search_mask = if start_bit >= 64 {
+                    0u64
+                } else if start_bit <= 0 {
+                    current_array_mask
+                } else {
+                    current_array_mask & (!((1u64 << (start_bit as u32)) - 1))
+                };
+                if search_mask != 0 {
+                    let idx = search_mask.trailing_zeros();
+                    chosen_idx_for_mask = Some(idx);
+                    Some(&tick_array_current.ticks[idx as usize])
+                } else {
+                    None
+                }
             }
         };
+        if next_initialized_tick.is_none() {
+            next_initialized_tick = if let Some(tick_state) =
+                tick_array_current.next_initialized_tick(state.tick, tick_spacing, zero_for_one)?
+            {
+                let idx_calc = (tick_state.tick - current_start) / tick_spacing_i32;
+                if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                    chosen_idx_for_mask = Some(idx_calc as u32);
+                }
+                Some(tick_state)
+            } else if !is_match_pool_current_tick_array {
+                is_match_pool_current_tick_array = true;
+                let first = tick_array_current.first_initialized_tick(zero_for_one)?;
+                let idx_calc = (first.tick - current_start) / tick_spacing_i32;
+                if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                    chosen_idx_for_mask = Some(idx_calc as u32);
+                }
+                Some(first)
+            } else {
+                None
+            };
+        }
+        let mut next_initialized_tick = next_initialized_tick.unwrap_or(&default_tick_state);
         #[cfg(feature = "enable-log")]
         msg!(
             "next_initialized_tick, status:{}, tick_index:{}, tick_array_current:{}",
@@ -907,7 +1012,7 @@ pub fn swap_on_swap_state(
         if !next_initialized_tick.is_initialized() {
             let next_initialized_tickarray_index = pool_state
                 .next_initialized_tick_array_start_index(
-                    &tickarray_bitmap_extension,
+                    tickarray_bitmap_extension,
                     current_vaild_tick_array_start_index,
                     zero_for_one,
                 )?;
@@ -917,6 +1022,9 @@ pub fn swap_on_swap_state(
             tick_array_current = tick_array_states
                 .pop_front()
                 .ok_or(ErrorCode::InvalidTickArrayBoundary)?;
+            current_start = tick_array_current.start_tick_index;
+            // Recompute the mask for the new array
+            current_array_mask = build_initialized_mask(tick_array_current);
 
             // let expected_next_tick_array_address = Pubkey::find_program_address(
             //     &[
@@ -939,6 +1047,12 @@ pub fn swap_on_swap_state(
 
             let first_initialized_tick = tick_array_current.first_initialized_tick(zero_for_one)?;
             next_initialized_tick = first_initialized_tick;
+            let idx_calc = (first_initialized_tick.tick - current_start) / tick_spacing_i32;
+            if idx_calc >= 0 && idx_calc < crate::states::tick_array::TICK_ARRAY_SIZE {
+                chosen_idx_for_mask = Some(idx_calc as u32);
+            } else {
+                chosen_idx_for_mask = None;
+            }
         }
         step.tick_next = next_initialized_tick.tick;
         step.initialized = next_initialized_tick.is_initialized();
@@ -948,7 +1062,11 @@ pub fn swap_on_swap_state(
         } else if step.tick_next > tick_math::MAX_TICK {
             step.tick_next = tick_math::MAX_TICK;
         }
-        step.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        if cached_tick_next != step.tick_next {
+            cached_tick_next = step.tick_next;
+            cached_sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(step.tick_next)?;
+        }
+        step.sqrt_price_next_x64 = cached_sqrt_price_next_x64;
 
         let target_price = if (zero_for_one && step.sqrt_price_next_x64 < sqrt_price_limit_x64)
             || (!zero_for_one && step.sqrt_price_next_x64 > sqrt_price_limit_x64)
@@ -1016,46 +1134,56 @@ pub fn swap_on_swap_state(
                 .ok_or(ErrorCode::CalculateOverflow)?;
         }
 
-        let step_fee_amount = step.fee_amount;
-        // if the protocol fee is on, calculate how much is owed, decrement fee_amount, and increment protocol_fee
-        if amm_config.protocol_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.protocol_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-            state.protocol_fee = state
-                .protocol_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-        }
-        // if the fund fee is on, calculate how much is owed, decrement fee_amount, and increment fund_fee
-        if amm_config.fund_fee_rate > 0 {
-            let delta = U128::from(step_fee_amount)
-                .checked_mul(amm_config.fund_fee_rate.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .checked_div(FEE_RATE_DENOMINATOR_VALUE.into())
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64();
-            step.fee_amount = step
-                .fee_amount
-                .checked_sub(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
-            state.fund_fee = state
-                .fund_fee
-                .checked_add(delta)
-                .ok_or(ErrorCode::CalculateOverflow)?;
+        // if the protocol/fund fee is on, calculate how much is owed, decrement fee_amount, and increment fee trackers
+        // Compute both deltas against the same base (step_fee_amount) to preserve rounding and behavior
+        if has_protocol_fee || has_fund_fee {
+            let fee_base_u128 = U128::from(step.fee_amount);
+            let mut total_fee_delta: u64 = 0;
+
+            if has_protocol_fee {
+                let delta = fee_base_u128
+                    .checked_mul(protocol_rate_u128)
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .checked_div(denom_u128)
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .as_u64();
+                state.protocol_fee = state
+                    .protocol_fee
+                    .checked_add(delta)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+                total_fee_delta = total_fee_delta
+                    .checked_add(delta)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+
+            if has_fund_fee {
+                let delta = fee_base_u128
+                    .checked_mul(fund_rate_u128)
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .checked_div(denom_u128)
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .as_u64();
+                state.fund_fee = state
+                    .fund_fee
+                    .checked_add(delta)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+                total_fee_delta = total_fee_delta
+                    .checked_add(delta)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+
+            if total_fee_delta != 0 {
+                step.fee_amount = step
+                    .fee_amount
+                    .checked_sub(total_fee_delta)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
         }
 
         // update global fee tracker
         if state.liquidity > 0 {
             let fee_growth_global_x64_delta = U128::from(step.fee_amount)
-                .mul_div_floor(U128::from(fixed_point_64::Q64), U128::from(state.liquidity))
+                .mul_div_floor(q64_u128, liquidity_u128)
                 .ok_or(ErrorCode::CalculateOverflow)?
                 .as_u128();
 
@@ -1093,6 +1221,10 @@ pub fn swap_on_swap_state(
                     liquidity_net = liquidity_net.neg();
                 }
                 state.liquidity = liquidity_math::add_delta(state.liquidity, liquidity_net)?;
+                liquidity_u128 = U128::from(state.liquidity);
+                if let Some(bit_idx) = chosen_idx_for_mask {
+                    current_array_mask &= !(1u64 << bit_idx);
+                }
             }
 
             state.tick = if zero_for_one {
@@ -1284,7 +1416,8 @@ mod swap_test {
                     tick_math::get_sqrt_price_at_tick(position_param.tick_upper).unwrap(),
                     position_param.amount_0,
                     position_param.amount_1,
-                );
+                )
+                .unwrap();
 
                 let (amount_0, amount_1) = get_delta_amounts_signed(
                     start_tick,
@@ -2683,6 +2816,7 @@ mod swap_test {
     mod sqrt_price_limit_optimization_test {
         use super::*;
         use proptest::prelude::*;
+        use rand::Rng;
         use std::{convert::identity, u64};
 
         use proptest::prop_assume;

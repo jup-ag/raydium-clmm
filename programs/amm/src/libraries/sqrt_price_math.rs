@@ -27,6 +27,7 @@ use super::{fixed_point_64, U256};
 /// √P' = √P * L / L'
 /// √P' = √P * L / (L + Δx*√P)
 ///
+#[inline(always)]
 pub fn get_next_sqrt_price_from_amount_0_rounding_up(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -40,7 +41,7 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
 
     if add {
         if let Some(product) = U256::from(amount).checked_mul(U256::from(sqrt_price_x64)) {
-            let denominator = numerator_1 + U256::from(product);
+            let denominator = numerator_1 + product;
             if denominator >= numerator_1 {
                 return numerator_1
                     .mul_div_ceil(U256::from(sqrt_price_x64), denominator)
@@ -57,11 +58,9 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
         )
         .as_u128()
     } else {
-        let product = U256::from(
-            U256::from(amount)
+        let product = U256::from(amount)
                 .checked_mul(U256::from(sqrt_price_x64))
-                .unwrap(),
-        );
+                .unwrap();
         let denominator = numerator_1.checked_sub(product).unwrap();
         numerator_1
             .mul_div_ceil(U256::from(sqrt_price_x64), denominator)
@@ -84,6 +83,7 @@ pub fn get_next_sqrt_price_from_amount_0_rounding_up(
 ///
 /// * `√P' = √P + Δy / L`
 ///
+#[inline(always)]
 pub fn get_next_sqrt_price_from_amount_1_rounding_down(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -104,6 +104,7 @@ pub fn get_next_sqrt_price_from_amount_1_rounding_down(
 
 /// Gets the next sqrt price given an input amount of token_0 or token_1
 /// Throws if price or liquidity are 0, or if the next price is out of bounds
+#[inline(always)]
 pub fn get_next_sqrt_price_from_input(
     sqrt_price_x64: u128,
     liquidity: u128,
@@ -125,6 +126,7 @@ pub fn get_next_sqrt_price_from_input(
 ///
 /// Throws if price or liquidity are 0 or the next price is out of bounds
 ///
+#[inline(always)]
 pub fn get_next_sqrt_price_from_output(
     sqrt_price_x64: u128,
     liquidity: u128,

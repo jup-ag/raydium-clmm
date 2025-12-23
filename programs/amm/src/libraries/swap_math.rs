@@ -15,6 +15,7 @@ pub struct SwapStep {
 }
 
 /// Computes the result of swapping some amount in, or amount out, given the parameters of the swap
+#[inline(always)]
 pub fn compute_swap_step(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,
@@ -27,14 +28,17 @@ pub fn compute_swap_step(
 ) -> Result<SwapStep> {
     // let exact_in = amount_remaining >= 0;
     let mut swap_step = SwapStep::default();
+    // Precompute fee denominators as u64 to avoid repeated conversions
+    let fee_denom_u64: u64 = u64::from(FEE_RATE_DENOMINATOR_VALUE);
+    let fee_denom_minus_fee_u64: u64 = fee_denom_u64
+        .checked_sub(u64::from(fee_rate))
+        .ok_or(ErrorCode::CalculateOverflow)?;
+
     if is_base_input {
         // round up amount_in
         // In exact input case, amount_remaining is positive
-        let amount_remaining_less_fee = (amount_remaining as u64)
-            .mul_div_floor(
-                (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
-                u64::from(FEE_RATE_DENOMINATOR_VALUE),
-            )
+        let amount_remaining_less_fee = amount_remaining
+            .mul_div_floor(fee_denom_minus_fee_u64, fee_denom_u64)
             .ok_or(ErrorCode::CalculateOverflow)?;
 
         let amount_in = calculate_amount_in_range(
@@ -136,17 +140,14 @@ pub fn compute_swap_step(
         if is_base_input && swap_step.sqrt_price_next_x64 != sqrt_price_target_x64 {
             // we didn't reach the target, so take the remainder of the maximum input as fee
             // swap dust is granted as fee
-            u64::from(amount_remaining)
+            amount_remaining
                 .checked_sub(swap_step.amount_in)
                 .ok_or(ErrorCode::CalculateOverflow)?
         } else {
             // take pip percentage as fee
             swap_step
                 .amount_in
-                .mul_div_ceil(
-                    fee_rate.into(),
-                    (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
-                )
+                .mul_div_ceil(fee_rate.into(), fee_denom_minus_fee_u64)
                 .ok_or(ErrorCode::CalculateOverflow)?
         };
 
@@ -183,13 +184,11 @@ fn calculate_amount_in_range(
         };
 
         if result.is_ok() {
-            return Ok(Some(result.unwrap()));
+            Ok(Some(result.unwrap()))
+        } else if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
+            Ok(None)
         } else {
-            if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
-                return Ok(None);
-            } else {
-                return Err(ErrorCode::SqrtPriceLimitOverflow.into());
-            }
+            Err(ErrorCode::SqrtPriceLimitOverflow.into())
         }
     } else {
         let result = if zero_for_one {
@@ -208,13 +207,11 @@ fn calculate_amount_in_range(
             )
         };
         if result.is_ok() {
-            return Ok(Some(result.unwrap()));
+            Ok(Some(result.unwrap()))
+        } else if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
+            Ok(None)
         } else {
-            if result.err().unwrap() == crate::error::ErrorCode::MaxTokenOverflow.into() {
-                return Ok(None);
-            } else {
-                return Err(ErrorCode::SqrtPriceLimitOverflow.into());
-            }
+            Err(ErrorCode::SqrtPriceLimitOverflow.into())
         }
     }
 }
