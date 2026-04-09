@@ -459,7 +459,7 @@ pub fn decrease_liquidity_instr(
             recipient_token_account_1: user_token_account_1,
             token_program: spl_token::id(),
             token_program_2022: spl_token_2022::id(),
-            memo_program: spl_memo::id(),
+            memo_program: spl_memo_interface::v3::id(),
             vault_0_mint: token_mint_0,
             vault_1_mint: token_mint_1,
         })
@@ -584,7 +584,7 @@ pub fn swap_v2_instr(
             observation_state,
             token_program: spl_token::id(),
             token_program_2022: spl_token_2022::id(),
-            memo_program: spl_memo::id(),
+            memo_program: spl_memo_interface::v3::id(),
             input_vault_mint,
             output_vault_mint,
         })

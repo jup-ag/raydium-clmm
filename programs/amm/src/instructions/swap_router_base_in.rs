@@ -27,13 +27,13 @@ pub struct SwapRouterBaseIn<'info> {
 
     /// CHECK:
     // #[account(
-    //     address = spl_memo::id()
+    //     address = anchor_spl::memo::ID
     // )]
     pub memo_program: UncheckedAccount<'info>,
 }
 
-pub fn swap_router_base_in<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, SwapRouterBaseIn<'info>>,
+pub fn swap_router_base_in<'info>(
+    ctx: Context<'info, SwapRouterBaseIn<'info>>,
     amount_in: u64,
     amount_out_minimum: u64,
 ) -> Result<()> {

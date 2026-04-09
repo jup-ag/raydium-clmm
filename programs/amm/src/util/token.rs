@@ -1,5 +1,6 @@
 use crate::states::*;
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_spl::{
     token::{self, Token},
     token_2022::{
@@ -29,9 +30,13 @@ pub fn invoke_memo_instruction<'info>(
     memo_msg: &[u8],
     memo_program: AccountInfo<'info>,
 ) -> solana_program::entrypoint::ProgramResult {
-    let ix = spl_memo::build_memo(memo_msg, &Vec::new());
+    let ix = spl_memo_interface::instruction::build_memo(
+        &spl_memo_interface::v3::id(),
+        memo_msg,
+        &[],
+    );
     let accounts = vec![memo_program];
-    solana_program::program::invoke(&ix, &accounts[..])
+    invoke(&ix, &accounts[..])
 }
 
 pub fn transfer_from_user_to_pool_vault<'info>(
@@ -46,38 +51,63 @@ pub fn transfer_from_user_to_pool_vault<'info>(
     if amount == 0 {
         return Ok(());
     }
-    let mut token_program_info = token_program.to_account_info();
+    let token_program_info = token_program.to_account_info();
     let from_token_info = from.to_account_info();
+    let to_vault_info = to_vault.to_account_info();
+    let signer_info = signer.to_account_info();
     match (mint, token_program_2022) {
         (Some(mint), Some(token_program_2022)) => {
             if from_token_info.owner == token_program_2022.key {
-                token_program_info = token_program_2022.to_account_info()
+                let mint_info = mint.to_account_info();
+                let ix = spl_token_2022::instruction::transfer_checked(
+                    token_program_2022.key,
+                    from_token_info.key,
+                    mint_info.key,
+                    to_vault_info.key,
+                    signer_info.key,
+                    &[],
+                    amount,
+                    mint.decimals,
+                )?;
+                invoke(
+                    &ix,
+                    &[from_token_info, mint_info, to_vault_info, signer_info, token_program_2022],
+                )
+                .map_err(Into::into)
+            } else {
+                let mint_info = mint.to_account_info();
+                let ix = token::spl_token::instruction::transfer_checked(
+                    &token::ID,
+                    from_token_info.key,
+                    mint_info.key,
+                    to_vault_info.key,
+                    signer_info.key,
+                    &[],
+                    amount,
+                    mint.decimals,
+                )?;
+                invoke(
+                    &ix,
+                    &[from_token_info, mint_info, to_vault_info, signer_info, token_program_info],
+                )
+                .map_err(Into::into)
             }
-            token_2022::transfer_checked(
-                CpiContext::new(
-                    token_program_info,
-                    token_2022::TransferChecked {
-                        from: from_token_info,
-                        to: to_vault.to_account_info(),
-                        authority: signer.to_account_info(),
-                        mint: mint.to_account_info(),
-                    },
-                ),
-                amount,
-                mint.decimals,
-            )
         }
-        _ => token::transfer(
-            CpiContext::new(
-                token_program_info,
-                token::Transfer {
-                    from: from_token_info,
-                    to: to_vault.to_account_info(),
-                    authority: signer.to_account_info(),
-                },
-            ),
-            amount,
-        ),
+        _ => {
+            let ix = token::spl_token::instruction::transfer(
+                &token::ID,
+                from_token_info.key,
+                to_vault_info.key,
+                signer_info.key,
+                &[],
+                amount,
+            )?;
+            invoke(
+                &ix,
+                &[from_token_info, to_vault_info, signer_info, token_program_info],
+            )
+            .map_err(Into::into)
+        }
     }
 }
 
@@ -93,40 +123,69 @@ pub fn transfer_from_pool_vault_to_user<'info>(
     if amount == 0 {
         return Ok(());
     }
-    let mut token_program_info = token_program.to_account_info();
+    let token_program_info = token_program.to_account_info();
     let from_vault_info = from_vault.to_account_info();
+    let to_info = to.to_account_info();
+    let authority_info = pool_state_loader.to_account_info();
+    let pool_state = pool_state_loader.load()?;
+    let seeds = pool_state.seeds();
+    let signer_seeds: &[&[&[u8]]] = &[&seeds];
     match (mint, token_program_2022) {
         (Some(mint), Some(token_program_2022)) => {
             if from_vault_info.owner == token_program_2022.key {
-                token_program_info = token_program_2022.to_account_info()
+                let mint_info = mint.to_account_info();
+                let ix = spl_token_2022::instruction::transfer_checked(
+                    token_program_2022.key,
+                    from_vault_info.key,
+                    mint_info.key,
+                    to_info.key,
+                    authority_info.key,
+                    &[],
+                    amount,
+                    mint.decimals,
+                )?;
+                invoke_signed(
+                    &ix,
+                    &[from_vault_info, mint_info, to_info, authority_info, token_program_2022],
+                    signer_seeds,
+                )
+                .map_err(Into::into)
+            } else {
+                let mint_info = mint.to_account_info();
+                let ix = token::spl_token::instruction::transfer_checked(
+                    &token::ID,
+                    from_vault_info.key,
+                    mint_info.key,
+                    to_info.key,
+                    authority_info.key,
+                    &[],
+                    amount,
+                    mint.decimals,
+                )?;
+                invoke_signed(
+                    &ix,
+                    &[from_vault_info, mint_info, to_info, authority_info, token_program_info],
+                    signer_seeds,
+                )
+                .map_err(Into::into)
             }
-            token_2022::transfer_checked(
-                CpiContext::new_with_signer(
-                    token_program_info,
-                    token_2022::TransferChecked {
-                        from: from_vault_info,
-                        to: to.to_account_info(),
-                        authority: pool_state_loader.to_account_info(),
-                        mint: mint.to_account_info(),
-                    },
-                    &[&pool_state_loader.load()?.seeds()],
-                ),
-                amount,
-                mint.decimals,
-            )
         }
-        _ => token::transfer(
-            CpiContext::new_with_signer(
-                token_program_info,
-                token::Transfer {
-                    from: from_vault_info,
-                    to: to.to_account_info(),
-                    authority: pool_state_loader.to_account_info(),
-                },
-                &[&pool_state_loader.load()?.seeds()],
-            ),
-            amount,
-        ),
+        _ => {
+            let ix = token::spl_token::instruction::transfer(
+                &token::ID,
+                from_vault_info.key,
+                to_info.key,
+                authority_info.key,
+                &[],
+                amount,
+            )?;
+            invoke_signed(
+                &ix,
+                &[from_vault_info, to_info, authority_info, token_program_info],
+                signer_seeds,
+            )
+            .map_err(Into::into)
+        }
     }
 }
 
@@ -138,21 +197,20 @@ pub fn close_spl_account<'a, 'b, 'c, 'info>(
     // token_program_2022: &Program<'info, Token2022>,
     signers_seeds: &[&[&[u8]]],
 ) -> Result<()> {
-    let token_program_info = token_program.to_account_info();
     let close_account_info = close_account.to_account_info();
-    // if close_account_info.owner == token_program_2022.key {
-    //     token_program_info = token_program_2022.to_account_info()
-    // }
-
-    token_2022::close_account(CpiContext::new_with_signer(
-        token_program_info,
-        token_2022::CloseAccount {
-            account: close_account_info,
-            destination: destination.to_account_info(),
-            authority: owner.to_account_info(),
-        },
+    let ix = token::spl_token::instruction::close_account(
+        &token_program.key(),
+        close_account_info.key,
+        destination.key,
+        owner.key,
+        &[],
+    )?;
+    invoke_signed(
+        &ix,
+        &[close_account_info, destination.to_account_info(), owner.to_account_info()],
         signers_seeds,
-    ))
+    )
+    .map_err(Into::into)
 }
 
 pub fn burn<'a, 'b, 'c, 'info>(
@@ -165,22 +223,22 @@ pub fn burn<'a, 'b, 'c, 'info>(
     amount: u64,
 ) -> Result<()> {
     let mint_info = mint.to_account_info();
-    let token_program_info: AccountInfo<'_> = token_program.to_account_info();
-    // if mint_info.owner == token_program_2022.key {
-    //     token_program_info = token_program_2022.to_account_info()
-    // }
-    token_2022::burn(
-        CpiContext::new_with_signer(
-            token_program_info,
-            token_2022::Burn {
-                mint: mint_info,
-                from: burn_account.to_account_info(),
-                authority: owner.to_account_info(),
-            },
-            signers_seeds,
-        ),
+    let burn_account_info = burn_account.to_account_info();
+    let owner_info = owner.to_account_info();
+    let ix = token::spl_token::instruction::burn(
+        &token_program.key(),
+        burn_account_info.key,
+        mint_info.key,
+        owner_info.key,
+        &[],
         amount,
+    )?;
+    invoke_signed(
+        &ix,
+        &[burn_account_info, mint_info, owner_info],
+        signers_seeds,
     )
+    .map_err(Into::into)
 }
 
 /// Calculate the fee for output amount

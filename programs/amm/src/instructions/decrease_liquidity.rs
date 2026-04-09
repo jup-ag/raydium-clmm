@@ -169,7 +169,7 @@ pub struct DecreaseLiquidityV2<'info> {
     /// memo program
     /// CHECK:
     #[account(
-        address = spl_memo::id()
+        address = anchor_spl::memo::ID
     )]
     pub memo_program: UncheckedAccount<'info>,
 
@@ -195,8 +195,8 @@ pub struct DecreaseLiquidityV2<'info> {
     // pub tick_array_bitmap: AccountLoader<'info, TickArrayBitmapExtension>,
 }
 
-pub fn decrease_liquidity_v1<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidity<'info>>,
+pub fn decrease_liquidity_v1<'info>(
+    ctx: Context<'info, DecreaseLiquidity<'info>>,
     liquidity: u128,
     amount_0_min: u64,
     amount_1_min: u64,
@@ -223,8 +223,8 @@ pub fn decrease_liquidity_v1<'a, 'b, 'c: 'info, 'info>(
     )
 }
 
-pub fn decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, DecreaseLiquidityV2<'info>>,
+pub fn decrease_liquidity_v2<'info>(
+    ctx: Context<'info, DecreaseLiquidityV2<'info>>,
     liquidity: u128,
     amount_0_min: u64,
     amount_1_min: u64,
@@ -251,7 +251,7 @@ pub fn decrease_liquidity_v2<'a, 'b, 'c: 'info, 'info>(
     )
 }
 
-pub fn decrease_liquidity<'a, 'b, 'c: 'info, 'info>(
+pub fn decrease_liquidity<'b, 'c: 'info, 'info>(
     pool_state_loader: &'b AccountLoader<'info, PoolState>,
     protocol_position: &'b mut Box<Account<'info, ProtocolPositionState>>,
     personal_position: &'b mut Box<Account<'info, PersonalPositionState>>,

@@ -51,8 +51,8 @@ pub struct ClosePosition<'info> {
     // pub token_program_2022: Program<'info, Token2022>,
 }
 
-pub fn close_position<'a, 'b, 'c, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, ClosePosition<'info>>,
+pub fn close_position<'info>(
+    ctx: Context<'info, ClosePosition<'info>>,
 ) -> Result<()> {
     if ctx.accounts.personal_position.liquidity != 0
         || ctx.accounts.personal_position.token_fees_owed_0 != 0

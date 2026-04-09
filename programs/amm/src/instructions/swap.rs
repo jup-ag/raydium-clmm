@@ -8,7 +8,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::Token;
 use anchor_spl::token_interface::TokenAccount;
 use std::cell::RefMut;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 #[cfg(feature = "enable-log")]
 use std::convert::identity;
 use std::ops::{Deref, Neg};
@@ -766,8 +766,8 @@ pub fn exact_internal<'b, 'c: 'info, 'info>(
     }
 }
 
-pub fn swap<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, SwapSingle<'info>>,
+pub fn swap<'info>(
+    ctx: Context<'info, SwapSingle<'info>>,
     amount: u64,
     other_amount_threshold: u64,
     sqrt_price_limit_x64: u128,
@@ -811,12 +811,86 @@ pub fn swap_on_swap_state(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
     mut state: SwapState,
+    tick_array_states: VecDeque<&TickArrayState>,
+    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
+    amount_specified: u64,
+    sqrt_price_limit_x64: u128,
+    zero_for_one: bool,
+    is_base_input: bool,
+) -> Result<(SwapState, u64, u64)> {
+    swap_on_swap_state_with_cache(
+        amm_config,
+        pool_state,
+        state,
+        tick_array_states,
+        tickarray_bitmap_extension,
+        amount_specified,
+        sqrt_price_limit_x64,
+        zero_for_one,
+        is_base_input,
+        None,
+    )
+}
+
+#[derive(Default)]
+pub struct SwapQuoteCache {
+    tick_masks: HashMap<(Pubkey, i32), TickArrayMaskCache>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct TickArrayMaskCache {
+    mask: u64,
+    recent_epoch: u64,
+}
+
+impl SwapQuoteCache {
+    #[inline(always)]
+    fn mask_for(&mut self, tick_array: &TickArrayState) -> u64 {
+        let key = (tick_array.pool_id, tick_array.start_tick_index);
+        let entry = self
+            .tick_masks
+            .entry(key)
+            .or_insert_with(|| TickArrayMaskCache {
+                mask: build_initialized_mask(tick_array),
+                recent_epoch: tick_array.recent_epoch,
+            });
+
+        if entry.recent_epoch != tick_array.recent_epoch {
+            entry.mask = build_initialized_mask(tick_array);
+            entry.recent_epoch = tick_array.recent_epoch;
+        }
+
+        entry.mask
+    }
+}
+
+#[inline(always)]
+fn build_initialized_mask(tick_array: &TickArrayState) -> u64 {
+    if tick_array.initialized_tick_count == 0 {
+        return 0;
+    }
+    let mut mask: u64 = 0;
+    let mut i: usize = 0;
+    while i < crate::states::tick_array::TICK_ARRAY_SIZE_USIZE {
+        if tick_array.ticks[i].is_initialized() {
+            mask |= 1u64 << i;
+        }
+        i += 1;
+    }
+    mask
+}
+
+pub fn swap_on_swap_state_with_cache(
+    amm_config: &AmmConfig,
+    pool_state: &PoolState,
+    mut state: SwapState,
     mut tick_array_states: VecDeque<&TickArrayState>,
     tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
     zero_for_one: bool,
     is_base_input: bool,
+    mut quote_cache: Option<&mut SwapQuoteCache>,
 ) -> Result<(SwapState, u64, u64)> {
     require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {

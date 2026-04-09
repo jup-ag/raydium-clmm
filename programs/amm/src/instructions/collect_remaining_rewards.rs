@@ -27,7 +27,7 @@ pub struct CollectRemainingRewards<'info> {
         address = reward_token_vault.mint
     )]
     pub reward_vault_mint: Box<InterfaceAccount<'info, Mint>>,
-    #[account(address = token::ID)]
+    #[account(address = anchor_spl::token::ID)]
     pub token_program: Program<'info, Token>,
     /// Token program 2022
     pub token_program_2022: Program<'info, Token2022>,
@@ -35,7 +35,7 @@ pub struct CollectRemainingRewards<'info> {
     /// memo program
     /// CHECK:
     #[account(
-        address = spl_memo::id()
+        address = anchor_spl::memo::ID
     )]
     pub memo_program: UncheckedAccount<'info>,
 }

@@ -4,11 +4,12 @@ use crate::libraries::tick_math;
 use crate::states::*;
 use crate::util::*;
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::metadata::Metadata;
 use anchor_spl::token::{self, Token};
-use anchor_spl::token_2022::{self, spl_token_2022::instruction::AuthorityType};
+use anchor_spl::token_2022::{self};
 use anchor_spl::token_interface::{Mint, Token2022, TokenAccount};
 // use mpl_token_metadata::{instruction::create_metadata_accounts_v3, state::Creator};
 use std::cell::RefMut;
@@ -313,8 +314,8 @@ pub struct OpenPositionV2<'info> {
     // pub tick_array_bitmap: AccountLoader<'info, TickArrayBitmapExtension>,
 }
 
-pub fn open_position_v1<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, OpenPosition<'info>>,
+pub fn open_position_v1<'info>(
+    ctx: Context<'info, OpenPosition<'info>>,
     liquidity: u128,
     amount_0_max: u64,
     amount_1_max: u64,
@@ -363,8 +364,8 @@ pub fn open_position_v1<'a, 'b, 'c: 'info, 'info>(
     )
 }
 
-pub fn open_position_v2<'a, 'b, 'c: 'info, 'info>(
-    ctx: Context<'a, 'b, 'c, 'info, OpenPositionV2<'info>>,
+pub fn open_position_v2<'info>(
+    ctx: Context<'info, OpenPositionV2<'info>>,
     liquidity: u128,
     amount_0_max: u64,
     amount_1_max: u64,
@@ -413,7 +414,7 @@ pub fn open_position_v2<'a, 'b, 'c: 'info, 'info>(
     )
 }
 
-pub fn open_position<'a, 'b, 'c: 'info, 'info>(
+pub fn open_position<'b, 'c: 'info, 'info>(
     payer: &'b Signer<'info>,
     position_nft_owner: &'b UncheckedAccount<'info>,
     position_nft_mint: &'b Box<InterfaceAccount<'info, Mint>>,
@@ -937,18 +938,25 @@ fn create_nft_with_metadata<'info>(
 ) -> Result<()> {
     let pool_state = pool_state_loader.load()?;
     let seeds = pool_state.seeds();
+    let signer_seeds: &[&[&[u8]]] = &[&seeds];
     // Mint the NFT
-    token::mint_to(
-        CpiContext::new_with_signer(
-            token_program.to_account_info(),
-            token::MintTo {
-                mint: position_nft_mint.to_account_info(),
-                to: position_nft_account.to_account_info(),
-                authority: pool_state_loader.to_account_info(),
-            },
-            &[&seeds],
-        ),
+    let mint_ix = token::spl_token::instruction::mint_to(
+        &token_program.key(),
+        &position_nft_mint.key(),
+        &position_nft_account.key(),
+        &pool_state_loader.key(),
+        &[],
         1,
+    )?;
+    invoke_signed(
+        &mint_ix,
+        &[
+            position_nft_mint.to_account_info(),
+            position_nft_account.to_account_info(),
+            pool_state_loader.to_account_info(),
+            token_program.to_account_info(),
+        ],
+        signer_seeds,
     )?;
     if with_matedata {
         // let create_metadata_ix = create_metadata_accounts_v3(
@@ -987,17 +995,22 @@ fn create_nft_with_metadata<'info>(
         // )?;
     }
     // Disable minting
-    token_2022::set_authority(
-        CpiContext::new_with_signer(
-            token_program.to_account_info(),
-            token_2022::SetAuthority {
-                current_authority: pool_state_loader.to_account_info(),
-                account_or_mint: position_nft_mint.to_account_info(),
-            },
-            &[&seeds],
-        ),
-        AuthorityType::MintTokens,
+    let set_authority_ix = token::spl_token::instruction::set_authority(
+        &token_program.key(),
+        &position_nft_mint.key(),
         None,
+        token::spl_token::instruction::AuthorityType::MintTokens,
+        &pool_state_loader.key(),
+        &[],
+    )?;
+    invoke_signed(
+        &set_authority_ix,
+        &[
+            position_nft_mint.to_account_info(),
+            pool_state_loader.to_account_info(),
+            token_program.to_account_info(),
+        ],
+        signer_seeds,
     )?;
     Ok(())
 }

@@ -1,4 +1,5 @@
 use anchor_lang::{prelude::*, system_program};
+use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 
 pub fn create_or_allocate_account<'a>(
     program_id: &Pubkey,
@@ -10,47 +11,40 @@ pub fn create_or_allocate_account<'a>(
 ) -> Result<()> {
     let rent = Rent::get()?;
     let current_lamports = target_account.lamports();
+    let signer_seeds = &[siger_seed];
 
     if current_lamports == 0 {
         let lamports = rent.minimum_balance(space);
-        let cpi_accounts = system_program::CreateAccount {
-            from: payer,
-            to: target_account.clone(),
-        };
-        let cpi_context = CpiContext::new(system_program.clone(), cpi_accounts);
-        system_program::create_account(
-            cpi_context.with_signer(&[siger_seed]),
+        let ix = system_instruction::create_account(
+            payer.key,
+            target_account.key,
             lamports,
             u64::try_from(space).unwrap(),
             program_id,
-        )?;
+        );
+        invoke_signed(&ix, &[payer, target_account, system_program], signer_seeds)?;
     } else {
         let required_lamports = rent
             .minimum_balance(space)
             .max(1)
             .saturating_sub(current_lamports);
         if required_lamports > 0 {
-            let cpi_accounts = system_program::Transfer {
-                from: payer.to_account_info(),
-                to: target_account.clone(),
-            };
-            let cpi_context = CpiContext::new(system_program.clone(), cpi_accounts);
-            system_program::transfer(cpi_context, required_lamports)?;
+            let ix = system_instruction::transfer(payer.key, target_account.key, required_lamports);
+            invoke_signed(
+                &ix,
+                &[payer.clone(), target_account.clone(), system_program.clone()],
+                &[],
+            )?;
         }
-        let cpi_accounts = system_program::Allocate {
-            account_to_allocate: target_account.clone(),
-        };
-        let cpi_context = CpiContext::new(system_program.clone(), cpi_accounts);
-        system_program::allocate(
-            cpi_context.with_signer(&[siger_seed]),
-            u64::try_from(space).unwrap(),
+        let ix = system_instruction::allocate(target_account.key, u64::try_from(space).unwrap());
+        invoke_signed(
+            &ix,
+            &[target_account.clone(), system_program.clone()],
+            signer_seeds,
         )?;
 
-        let cpi_accounts = system_program::Assign {
-            account_to_assign: target_account.clone(),
-        };
-        let cpi_context = CpiContext::new(system_program.clone(), cpi_accounts);
-        system_program::assign(cpi_context.with_signer(&[siger_seed]), program_id)?;
+        let ix = system_instruction::assign(target_account.key, program_id);
+        invoke_signed(&ix, &[target_account, system_program], signer_seeds)?;
     }
     Ok(())
 }
