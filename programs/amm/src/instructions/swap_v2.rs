@@ -3,7 +3,7 @@ use std::ops::Deref;
 
 use crate::error::ErrorCode;
 use crate::libraries::tick_math;
-use crate::swap::swap_internal;
+use crate::swap::{swap_internal, SwapInternalResult};
 use crate::util::*;
 use crate::{states::*, util};
 use anchor_lang::prelude::*;
@@ -88,8 +88,7 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
 
     let block_timestamp = solana_program::clock::Clock::get()?.unix_timestamp as u64;
 
-    let amount_0;
-    let amount_1;
+    let swap_result: SwapInternalResult;
     let zero_for_one;
     let swap_price_before;
 
@@ -132,22 +131,18 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         let tick_array_bitmap_extension_key = TickArrayBitmapExtension::key(pool_state.key());
         for account_info in remaining_accounts.into_iter() {
             if account_info.key().eq(&tick_array_bitmap_extension_key) {
-                tickarray_bitmap_extension = Some(
-                    *(AccountLoader::<TickArrayBitmapExtension>::try_from(account_info)?
-                        .load()?
-                        .deref()),
-                );
+                tickarray_bitmap_extension = Some(account_info);
                 continue;
             }
             tick_array_states.push_back(AccountLoad::load_data_mut(account_info)?);
         }
 
-        (amount_0, amount_1) = swap_internal(
+        swap_result = swap_internal(
             &ctx.amm_config,
             pool_state,
             tick_array_states,
             &mut ctx.observation_state.load_mut()?,
-            &tickarray_bitmap_extension,
+            tickarray_bitmap_extension,
             amount_calculate_specified,
             if sqrt_price_limit_x64 == 0 {
                 if zero_for_one {
@@ -167,14 +162,16 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         msg!(
             "exact_swap_internal, is_base_input:{}, amount_0: {}, amount_1: {}",
             is_base_input,
-            amount_0,
-            amount_1
+            swap_result.amount_0,
+            swap_result.amount_1
         );
         require!(
-            amount_0 != 0 && amount_1 != 0,
+            swap_result.amount_0 != 0 && swap_result.amount_1 != 0,
             ErrorCode::TooSmallInputOrOutputAmount
         );
     }
+    let amount_0 = swap_result.amount_0;
+    let amount_1 = swap_result.amount_1;
     let (token_account_0, token_account_1, vault_0, vault_1, vault_0_mint, vault_1_mint) =
         if zero_for_one {
             (
@@ -285,9 +282,8 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
     ctx.output_token_account.reload()?;
     ctx.input_token_account.reload()?;
 
-    let pool_state = ctx.pool_state.load()?;
     emit!(SwapEvent {
-        pool_state: pool_state.key(),
+        pool_state: ctx.pool_state.key(),
         sender: ctx.payer.key(),
         token_account_0: token_account_0.key(),
         token_account_1: token_account_1.key(),
@@ -296,14 +292,16 @@ pub fn exact_internal_v2<'c: 'info, 'info>(
         amount_1: amount_1_without_fee,
         transfer_fee_1,
         zero_for_one,
-        sqrt_price_x64: pool_state.sqrt_price_x64,
-        liquidity: pool_state.liquidity,
-        tick: pool_state.tick_current
+        sqrt_price_x64: swap_result.sqrt_price_x64,
+        liquidity: swap_result.liquidity,
+        tick: swap_result.tick,
+        trade_fee_0: swap_result.trade_fee_0,
+        trade_fee_1: swap_result.trade_fee_1,
     });
     if zero_for_one {
-        require_gt!(swap_price_before, pool_state.sqrt_price_x64);
+        require_gt!(swap_price_before, swap_result.sqrt_price_x64);
     } else {
-        require_gt!(pool_state.sqrt_price_x64, swap_price_before);
+        require_gt!(swap_result.sqrt_price_x64, swap_price_before);
     }
     if sqrt_price_limit_x64 == 0 {
         // Does't allow partial filled without specified limit_price.

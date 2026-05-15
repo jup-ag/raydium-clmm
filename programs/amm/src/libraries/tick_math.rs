@@ -1,4 +1,7 @@
-use crate::{error::ErrorCode, libraries::big_num::U128};
+use crate::{
+    error::ErrorCode,
+    libraries::{big_num::U128, fixed_point_64, full_math::MulDiv},
+};
 
 use anchor_lang::require;
 
@@ -180,6 +183,33 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::
     } else {
         tick_low
     })
+}
+
+/// Returns the price (token_1 / token_0, Q64.64) at a given tick.
+///
+/// Derived from `get_sqrt_price_at_tick(tick)^2 / 2^64`. Rounding direction matters for
+/// limit-order accounting: `round_up = true` ceil-divides, `round_up = false` floor-divides.
+///
+/// Phase 1 port; consumed by `TickState::get_limit_order_output/input` which in turn are
+/// called by the Phase 3 `swap_on_swap_state` rewrite. No callers in the slim SDK yet.
+pub fn get_price_at_tick(tick: i32, round_up: bool) -> Result<U128, anchor_lang::error::Error> {
+    let token_0_sqrt_price = get_sqrt_price_at_tick(tick)?;
+    let token_0_price = if round_up {
+        U128::from(token_0_sqrt_price)
+            .mul_div_ceil(
+                U128::from(token_0_sqrt_price),
+                U128::from(fixed_point_64::Q64),
+            )
+            .ok_or(ErrorCode::CalculateOverflow)?
+    } else {
+        U128::from(token_0_sqrt_price)
+            .mul_div_floor(
+                U128::from(token_0_sqrt_price),
+                U128::from(fixed_point_64::Q64),
+            )
+            .ok_or(ErrorCode::CalculateOverflow)?
+    };
+    Ok(token_0_price)
 }
 
 #[cfg(test)]

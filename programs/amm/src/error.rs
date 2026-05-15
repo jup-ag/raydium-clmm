@@ -105,4 +105,7 @@ pub enum ErrorCode {
     MaxTokenOverflow,
     #[msg("calculate overflow")]
     CalculateOverflow,
+
+    #[msg("Invalid limit order amount")]
+    InvalidLimitOrderAmount,
 }
