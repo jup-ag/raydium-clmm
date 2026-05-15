@@ -12,12 +12,10 @@ doctest = false
 
 [features]
 no-entrypoint = []
-no-idl = []
 cpi = ["no-entrypoint"]
 default = []
 client = []
 no-log-ix-name = []
-init_if_needed = []
 enable-log = []
 devnet = []
 paramset = []
@@ -28,10 +26,8 @@ anchor-spl = { version = "1.0.0", features = ["metadata", "memo"] }
 solana-program = "4.0.0"
 spl-memo-interface = "2.0.0"
 uint = { git = "https://github.com/raydium-io/parity-common", package = "uint" }
-# mpl-token-metadata = { version = "^1.11.0", features = ["no-entrypoint"] }
 bytemuck = { version = "1.4.0", features = ["derive", "min_const_generics"] }
 arrayref = { version = "0.3.6" }
-solana-security-txt = "1.1.1"
 
 [dev-dependencies]
 quickcheck = "0.9"
