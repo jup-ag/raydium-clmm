@@ -25,13 +25,13 @@ pub const REWARD_NUM: usize = 3;
 pub mod reward_period_limit {
     pub const MIN_REWARD_PERIOD: u64 = 1 * 60 * 60;
     pub const MAX_REWARD_PERIOD: u64 = 2 * 60 * 60;
-    pub const INCREASE_EMISSIONES_PERIOD: u64 = 30 * 60;
+    pub const INCREASE_EMISSIONS_PERIOD: u64 = 30 * 60;
 }
 #[cfg(not(feature = "paramset"))]
 pub mod reward_period_limit {
     pub const MIN_REWARD_PERIOD: u64 = 7 * 24 * 60 * 60;
     pub const MAX_REWARD_PERIOD: u64 = 90 * 24 * 60 * 60;
-    pub const INCREASE_EMISSIONES_PERIOD: u64 = 72 * 60 * 60;
+    pub const INCREASE_EMISSIONS_PERIOD: u64 = 72 * 60 * 60;
 }
 
 pub enum PoolStatusBitIndex {
@@ -40,6 +40,7 @@ pub enum PoolStatusBitIndex {
     CollectFee,
     CollectReward,
     Swap,
+    LimitOrder,
 }
 
 #[derive(PartialEq, Eq)]
@@ -99,11 +100,7 @@ pub struct PoolState {
     pub protocol_fees_token_0: u64,
     pub protocol_fees_token_1: u64,
 
-    /// The amounts in and out of swap token_0 and token_1
-    pub swap_in_amount_token_0: u128,
-    pub swap_out_amount_token_1: u128,
-    pub swap_in_amount_token_1: u128,
-    pub swap_out_amount_token_0: u128,
+    pub padding5: [u128; 4],
 
     /// Bitwise representation of the state of the pool
     /// bit0, 1: disable open position and increase liquidity, 0: normal
@@ -111,21 +108,19 @@ pub struct PoolState {
     /// bit2, 1: disable collect fee, 0: normal
     /// bit3, 1: disable collect reward, 0: normal
     /// bit4, 1: disable swap, 0: normal
+    /// bit5, 1: disable limit order, 0: normal
     pub status: u8,
+    /// Fee on which token (0 = FromInput, 1 = Token0Only, 2 = Token1Only)
+    pub fee_on: u8,
     /// Leave blank for future use
-    pub padding: [u8; 7],
+    pub padding: [u8; 6],
 
     pub reward_infos: [RewardInfo; REWARD_NUM],
 
     /// Packed initialized tick array state
     pub tick_array_bitmap: [u64; 16],
 
-    /// except protocol_fee and fund_fee
-    pub total_fees_token_0: u64,
-    /// except protocol_fee and fund_fee
-    pub total_fees_claimed_token_0: u64,
-    pub total_fees_token_1: u64,
-    pub total_fees_claimed_token_1: u64,
+    pub padding6: [u64; 4],
 
     pub fund_fees_token_0: u64,
     pub fund_fees_token_1: u64,
@@ -135,8 +130,10 @@ pub struct PoolState {
     // account recent update epoch
     pub recent_epoch: u64,
 
+    /// Dynamic fee info
+    pub dynamic_fee_info: DynamicFeeInfo,
     // Unused bytes for future upgrades.
-    pub padding1: [u64; 24],
+    pub padding1: [u64; 14],
     pub padding2: [u64; 32],
 }
 
@@ -161,9 +158,12 @@ impl PoolState {
         + 16
         + 16
         + 8
-        + RewardInfo::LEN * REWARD_NUM
+        + RewardInfo::LEN * REWARD_NUM // 169 * 3 = 507
         + 8 * 16
-        + 512;
+        + 8 * 8
+        + DynamicFeeInfo::LEN // 80
+        + 8 * 14
+        + 8 * 32;
 
     pub fn seeds(&self) -> [&[u8]; 5] {
         [
@@ -213,22 +213,18 @@ impl PoolState {
         self.fee_growth_global_1_x64 = 0;
         self.protocol_fees_token_0 = 0;
         self.protocol_fees_token_1 = 0;
-        self.swap_in_amount_token_0 = 0;
-        self.swap_out_amount_token_1 = 0;
-        self.swap_in_amount_token_1 = 0;
-        self.swap_out_amount_token_0 = 0;
+        self.padding5 = [0; 4];
         self.status = 0;
-        self.padding = [0; 7];
+        self.fee_on = 0;
+        self.padding = [0; 6];
         self.tick_array_bitmap = [0; 16];
-        self.total_fees_token_0 = 0;
-        self.total_fees_claimed_token_0 = 0;
-        self.total_fees_token_1 = 0;
-        self.total_fees_claimed_token_1 = 0;
+        self.padding6 = [0; 4];
         self.fund_fees_token_0 = 0;
         self.fund_fees_token_1 = 0;
         self.open_time = open_time;
         self.recent_epoch = get_recent_epoch()?;
-        self.padding1 = [0; 24];
+        self.dynamic_fee_info = DynamicFeeInfo::default();
+        self.padding1 = [0; 14];
         self.padding2 = [0; 32];
         self.observation_key = observation_state_key;
 
@@ -271,8 +267,8 @@ impl PoolState {
                     .checked_add(reward_growth_delta.as_u128())
                     .unwrap();
 
-                reward_info.reward_total_emissioned = reward_info
-                    .reward_total_emissioned
+                reward_info.reward_total_emitted = reward_info
+                    .reward_total_emitted
                     .checked_add(
                         U128::from(time_delta)
                             .mul_div_ceil(
@@ -309,7 +305,7 @@ impl PoolState {
         self.reward_infos = next_reward_infos;
         #[cfg(feature = "enable-log")]
         msg!("update pool reward info, reward_0_total_emissioned:{}, reward_1_total_emissioned:{}, reward_2_total_emissioned:{}, pool.liquidity:{}",
-        identity(self.reward_infos[0].reward_total_emissioned),identity(self.reward_infos[1].reward_total_emissioned),identity(self.reward_infos[2].reward_total_emissioned), identity(self.liquidity));
+        identity(self.reward_infos[0].reward_total_emitted),identity(self.reward_infos[1].reward_total_emitted),identity(self.reward_infos[2].reward_total_emitted), identity(self.liquidity));
         self.recent_epoch = get_recent_epoch()?;
         Ok(next_reward_infos)
     }
@@ -317,14 +313,14 @@ impl PoolState {
     pub fn check_unclaimed_reward(&self, index: usize, reward_amount_owed: u64) -> Result<()> {
         assert!(index < REWARD_NUM);
         let unclaimed_reward = self.reward_infos[index]
-            .reward_total_emissioned
+            .reward_total_emitted
             .checked_sub(self.reward_infos[index].reward_claimed)
             .unwrap();
         require_gte!(unclaimed_reward, reward_amount_owed);
         Ok(())
     }
 
-    pub fn add_reward_clamed(&mut self, index: usize, amount: u64) -> Result<()> {
+    pub fn add_reward_claimed(&mut self, index: usize, amount: u64) -> Result<()> {
         assert!(index < REWARD_NUM);
         self.reward_infos[index].reward_claimed = self.reward_infos[index]
             .reward_claimed
@@ -336,7 +332,7 @@ impl PoolState {
     pub fn get_tick_array_offset(&self, tick_array_start_index: i32) -> Result<usize> {
         require!(
             TickArrayState::check_is_valid_start_index(tick_array_start_index, self.tick_spacing),
-            ErrorCode::InvaildTickIndex
+            ErrorCode::InvalidTickIndex
         );
         let tick_array_offset_in_bitmap = tick_array_start_index
             / TickArrayState::tick_count(self.tick_spacing)
@@ -370,6 +366,97 @@ impl PoolState {
             .flip_tick_array_bit(tick_array_start_index, self.tick_spacing)
         } else {
             self.flip_tick_array_bit_internal(tick_array_start_index)
+        }
+    }
+
+    /// Get the first initialized tick array start index with tickarray bitmap extension info.
+    ///
+    /// AccountInfo variant used by on-chain `swap_internal`. The quote-path equivalent is
+    /// `get_first_initialized_tick_array` (below), which takes a pre-deserialized
+    /// `&Option<TickArrayBitmapExtension>` instead of an `AccountInfo`.
+    pub fn first_tick_array_index_with_extension_info<'c: 'info, 'info>(
+        &self,
+        tickarray_bitmap_extension_info: Option<&'c AccountInfo<'info>>,
+        zero_for_one: bool,
+    ) -> Result<(bool, i32)> {
+        let (is_initialized, start_index) =
+            if self.is_overflow_default_tickarray_bitmap(vec![self.tick_current]) {
+                // Only load extension when needed (when overflow default bitmap)
+                let extension_info = tickarray_bitmap_extension_info
+                    .ok_or(ErrorCode::MissingTickArrayBitmapExtensionAccount)?;
+                AccountLoader::<TickArrayBitmapExtension>::try_from(extension_info)?
+                    .load()?
+                    .check_tick_array_is_initialized(
+                        TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
+                        self.tick_spacing,
+                    )?
+            } else {
+                check_current_tick_array_is_initialized(
+                    U1024(self.tick_array_bitmap),
+                    self.tick_current,
+                    self.tick_spacing.into(),
+                )?
+            };
+        if is_initialized {
+            return Ok((true, start_index));
+        }
+        let next_start_index = self
+            .next_tick_array_index_with_extension_info(
+                tickarray_bitmap_extension_info,
+                TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
+                zero_for_one,
+            )?
+            .ok_or(ErrorCode::InsufficientLiquidityForDirection)?;
+        Ok((false, next_start_index))
+    }
+
+    /// Get the next initialized tick array start index with tickarray bitmap extension info.
+    ///
+    /// AccountInfo variant; see `next_initialized_tick_array_start_index` for the quote-path overload.
+    pub fn next_tick_array_index_with_extension_info<'c: 'info, 'info>(
+        &self,
+        tickarray_bitmap_extension_info: Option<&'c AccountInfo<'info>>,
+        mut last_tick_array_start_index: i32,
+        zero_for_one: bool,
+    ) -> Result<Option<i32>> {
+        last_tick_array_start_index =
+            TickArrayState::get_array_start_index(last_tick_array_start_index, self.tick_spacing);
+
+        loop {
+            let (is_found, start_index) =
+                tick_array_bit_map::next_initialized_tick_array_start_index(
+                    U1024(self.tick_array_bitmap),
+                    last_tick_array_start_index,
+                    self.tick_spacing,
+                    zero_for_one,
+                );
+            if is_found {
+                return Ok(Some(start_index));
+            }
+            last_tick_array_start_index = start_index;
+
+            // Only load extension when needed (after default bitmap search fails)
+            let extension_info = tickarray_bitmap_extension_info
+                .ok_or(ErrorCode::MissingTickArrayBitmapExtensionAccount)?;
+            let extension_loader =
+                AccountLoader::<TickArrayBitmapExtension>::try_from(extension_info)?;
+            let (is_found, start_index) = extension_loader
+                .load()?
+                .next_initialized_tick_array_from_one_bitmap(
+                    last_tick_array_start_index,
+                    self.tick_spacing,
+                    zero_for_one,
+                )?;
+            if is_found {
+                return Ok(Some(start_index));
+            }
+            last_tick_array_start_index = start_index;
+
+            if last_tick_array_start_index < tick_math::MIN_TICK
+                || last_tick_array_start_index > tick_math::MAX_TICK
+            {
+                return Ok(None);
+            }
         }
     }
 
@@ -508,6 +595,83 @@ impl PoolState {
         }
         (min_tick_boundary, max_tick_boundary)
     }
+
+    /// Mutate pool state after a swap step. Called by the on-chain `swap_internal`
+    /// after the swap loop completes.
+    pub fn update_after_swap(
+        &mut self,
+        tick_current: i32,
+        sqrt_price_x64: u128,
+        liquidity: u128,
+        lp_fee: u64, // fee for lp
+        protocol_fee: u64,
+        fund_fee: u64,
+        fee_growth_global_x64: u128,
+        zero_for_one: bool, // swap direction
+        dynamic_fee_info: Option<DynamicFeeInfo>,
+    ) -> Result<()> {
+        self.tick_current = tick_current;
+        self.sqrt_price_x64 = sqrt_price_x64;
+        self.liquidity = liquidity;
+        self.update_fee(
+            lp_fee,
+            protocol_fee,
+            fund_fee,
+            fee_growth_global_x64,
+            zero_for_one,
+        )?;
+        self.update_dynamic_fee_variables(dynamic_fee_info)?;
+        Ok(())
+    }
+
+    pub fn update_fee(
+        &mut self,
+        lp_fee: u64, // fee for lp
+        protocol_fee: u64,
+        fund_fee: u64,
+        fee_growth_global_x64: u128,
+        zero_for_one: bool, // swap direction
+    ) -> Result<()> {
+        // Determine if fees should be recorded to token0
+        let fee_from_token0 = self.is_fee_on_token0(zero_for_one);
+
+        // Record fees to the appropriate token based on fee_from_token0
+        if fee_from_token0 {
+            if lp_fee > 0 {
+                self.fee_growth_global_0_x64 = fee_growth_global_x64;
+            }
+            if protocol_fee > 0 {
+                self.protocol_fees_token_0 = self
+                    .protocol_fees_token_0
+                    .checked_add(protocol_fee)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+            if fund_fee > 0 {
+                self.fund_fees_token_0 = self
+                    .fund_fees_token_0
+                    .checked_add(fund_fee)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+        } else {
+            if lp_fee > 0 {
+                self.fee_growth_global_1_x64 = fee_growth_global_x64;
+            }
+            if protocol_fee > 0 {
+                self.protocol_fees_token_1 = self
+                    .protocol_fees_token_1
+                    .checked_add(protocol_fee)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+            if fund_fee > 0 {
+                self.fund_fees_token_1 = self
+                    .fund_fees_token_1
+                    .checked_add(fund_fee)
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, AnchorSerialize, AnchorDeserialize, Debug, PartialEq)]
@@ -537,8 +701,8 @@ pub struct RewardInfo {
     pub last_update_time: u64,
     /// Q64.64 number indicates how many tokens per second are earned per unit of liquidity.
     pub emissions_per_second_x64: u128,
-    /// The total amount of reward emissioned
-    pub reward_total_emissioned: u64,
+    /// The total amount of reward emitted
+    pub reward_total_emitted: u64,
     /// The total amount of claimed reward
     pub reward_claimed: u64,
     /// Reward token mint.
@@ -668,6 +832,12 @@ pub struct SwapEvent {
 
     /// The log base 1.0001 of price of the pool after the swap
     pub tick: i32,
+
+    /// Total AMM trade fee (lp + protocol + fund) charged in token_0 during this swap
+    pub trade_fee_0: u64,
+
+    /// Total AMM trade fee (lp + protocol + fund) charged in token_1 during this swap
+    pub trade_fee_1: u64,
 }
 
 /// Emitted pool liquidity change when increase and decrease liquidity

@@ -55,7 +55,7 @@ impl TickArrayBitmapExtension {
     fn get_bitmap_offset(tick_index: i32, tick_spacing: u16) -> Result<usize> {
         require!(
             TickArrayState::check_is_valid_start_index(tick_index, tick_spacing),
-            ErrorCode::InvaildTickIndex
+            ErrorCode::InvalidTickIndex
         );
         Self::check_extension_boundary(tick_index, tick_spacing)?;
         let ticks_in_one_bitmap = max_tick_in_tickarray_bitmap(tick_spacing);
@@ -277,7 +277,6 @@ pub mod tick_array_bitmap_extension_test {
             param.data.as_mut_slice(),
             &param.owner,
             false,
-            0,
         )
     }
 

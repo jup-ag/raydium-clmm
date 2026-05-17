@@ -17,9 +17,9 @@ pub enum ErrorCode {
     ZeroMintAmount,
 
     #[msg("Tick out of range")]
-    InvaildTickIndex,
+    InvalidTickIndex,
     #[msg("The lower tick must be below the upper tick")]
-    TickInvaildOrder,
+    TickInvalidOrder,
     #[msg("The tick must be greater, or equal to the minimum tick(-221818)")]
     TickLowerOverflow,
     #[msg("The tick must be lesser than, or equal to the maximum tick(221818)")]
@@ -105,4 +105,9 @@ pub enum ErrorCode {
     MaxTokenOverflow,
     #[msg("calculate overflow")]
     CalculateOverflow,
+    #[msg("TransferFee calculate not match")]
+    TransferFeeCalculateNotMatch,
+
+    #[msg("Invalid limit order amount")]
+    InvalidLimitOrderAmount,
 }
