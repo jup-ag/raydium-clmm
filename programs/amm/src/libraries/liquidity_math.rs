@@ -177,7 +177,7 @@ pub fn get_delta_amount_0_unsigned(
     let numerator_1 = U256::from(liquidity) << fixed_point_64::RESOLUTION;
     let numerator_2 = U256::from(sqrt_ratio_b_x64 - sqrt_ratio_a_x64);
 
-    assert!(sqrt_ratio_a_x64 > 0);
+    require!(sqrt_ratio_a_x64 > 0, ErrorCode::SqrtPriceX64);
 
     let result = if round_up {
         U256::div_rounding_up(
