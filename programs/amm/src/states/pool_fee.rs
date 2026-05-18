@@ -3,6 +3,7 @@
 // everything here is currently unreferenced. Lives in the SDK now so the
 // PoolState byte layout resolves and helpers are ready for that rewrite.
 
+use crate::error::ErrorCode;
 use crate::states::*;
 use anchor_lang::prelude::*;
 
@@ -212,11 +213,13 @@ impl PoolState {
     }
 }
 
-pub fn tick_spacing_index_from_tick(tick_index: i32, tick_spacing: u16) -> i32 {
+pub fn tick_spacing_index_from_tick(tick_index: i32, tick_spacing: u16) -> Result<i32> {
+    require!(tick_spacing != 0, ErrorCode::InvalidTickArrayBoundary);
     let tick_spacing = i32::from(tick_spacing);
-    if tick_index % tick_spacing == 0 || tick_index >= 0 {
+    let index = if tick_index % tick_spacing == 0 || tick_index >= 0 {
         tick_index / tick_spacing
     } else {
         tick_index / tick_spacing - 1
-    }
+    };
+    Ok(index)
 }

@@ -429,7 +429,7 @@ impl PoolState {
                     last_tick_array_start_index,
                     self.tick_spacing,
                     zero_for_one,
-                );
+                )?;
             if is_found {
                 return Ok(Some(start_index));
             }
@@ -468,7 +468,8 @@ impl PoolState {
         let (is_initialized, start_index) =
             if self.is_overflow_default_tickarray_bitmap(vec![self.tick_current]) {
                 tickarray_bitmap_extension
-                    .unwrap()
+                    .as_ref()
+                    .ok_or(ErrorCode::MissingTickArrayBitmapExtensionAccount)?
                     .check_tick_array_is_initialized(
                         TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
                         self.tick_spacing,
@@ -483,16 +484,14 @@ impl PoolState {
         if is_initialized {
             return Ok((true, start_index));
         }
-        let next_start_index = self.next_initialized_tick_array_start_index(
-            tickarray_bitmap_extension,
-            TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
-            zero_for_one,
-        )?;
-        require!(
-            next_start_index.is_some(),
-            ErrorCode::InsufficientLiquidityForDirection
-        );
-        return Ok((false, next_start_index.unwrap()));
+        let next_start_index = self
+            .next_initialized_tick_array_start_index(
+                tickarray_bitmap_extension,
+                TickArrayState::get_array_start_index(self.tick_current, self.tick_spacing),
+                zero_for_one,
+            )?
+            .ok_or(ErrorCode::InsufficientLiquidityForDirection)?;
+        Ok((false, next_start_index))
     }
 
     pub fn next_initialized_tick_array_start_index(
@@ -511,7 +510,7 @@ impl PoolState {
                     last_tick_array_start_index,
                     self.tick_spacing,
                     zero_for_one,
-                );
+                )?;
             if is_found {
                 return Ok(Some(start_index));
             }

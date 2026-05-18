@@ -172,7 +172,8 @@ impl SwapState {
             dynamic_fee_info: pool_state.get_dynamic_fee_info(),
         };
         if let Some(dynamic_fee_info) = &mut state.dynamic_fee_info {
-            state.tick_spacing_index = tick_spacing_index_from_tick(state.tick, state.tick_spacing);
+            state.tick_spacing_index =
+                tick_spacing_index_from_tick(state.tick, state.tick_spacing)?;
             dynamic_fee_info.update_reference(state.tick_spacing_index, block_timestamp)?;
         }
         Ok(state)
@@ -383,7 +384,7 @@ impl SwapState {
                     self.tick
                 };
                 let mut tick_spacing_index =
-                    tick_spacing_index_from_tick(tick_index, self.tick_spacing);
+                    tick_spacing_index_from_tick(tick_index, self.tick_spacing)?;
                 if !zero_for_one && tick_index % (self.tick_spacing as i32) == 0 {
                     tick_spacing_index = tick_spacing_index - 1;
                 }
@@ -404,7 +405,7 @@ impl SwapState {
         if self.dynamic_fee_info.is_some() {
             let tick_index = tick_math::get_tick_at_sqrt_price(self.sqrt_price_x64)?;
             let final_tick_spacing_index =
-                tick_spacing_index_from_tick(tick_index, self.tick_spacing);
+                tick_spacing_index_from_tick(tick_index, self.tick_spacing)?;
             if self.tick_spacing_index != final_tick_spacing_index {
                 self.tick_spacing_index = final_tick_spacing_index;
                 self.update_volatility_accumulator()?;
@@ -457,14 +458,23 @@ impl SwapState {
 
     pub fn get_total_fee_rate(&self) -> Result<u32> {
         // Use base + dynamic fee if dynamic fee is enabled
-        if let Some(dynamic_fee_info) = &self.dynamic_fee_info {
+        let fee_rate = if let Some(dynamic_fee_info) = &self.dynamic_fee_info {
             let dynamic_fee_rate =
                 Self::compute_dynamic_fee_rate(dynamic_fee_info, self.tick_spacing)?;
-            let total_fee_rate = self.base_fee_rate + dynamic_fee_rate;
-            return Ok(total_fee_rate.min(MAX_FEE_RATE_NUMERATOR));
-        }
-        // Use base fee if not in launch phase and dynamic fee is disabled
-        Ok(self.base_fee_rate)
+            self.base_fee_rate
+                .checked_add(dynamic_fee_rate)
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .min(MAX_FEE_RATE_NUMERATOR)
+        } else {
+            // Use base fee if dynamic fee is disabled
+            self.base_fee_rate
+        };
+        // The downstream fee math relies on `FEE_RATE_DENOMINATOR_VALUE - fee_rate` not underflowing.
+        require!(
+            fee_rate < FEE_RATE_DENOMINATOR_VALUE,
+            ErrorCode::CalculateOverflow
+        );
+        Ok(fee_rate)
     }
 
     /// Computes the dynamic fee rate based on volatility accumulator.
@@ -477,10 +487,15 @@ impl SwapState {
         dynamic_fee_info: &DynamicFeeInfo,
         tick_spacing: u16,
     ) -> Result<u32> {
-        let crossed = dynamic_fee_info.volatility_accumulator * tick_spacing as u32;
+        // Widen before multiplying so a large `volatility_accumulator * tick_spacing` can't wrap u32.
+        let crossed = u64::from(dynamic_fee_info.volatility_accumulator)
+            .checked_mul(u64::from(tick_spacing))
+            .ok_or(ErrorCode::CalculateOverflow)?;
 
         // Square the crossed value to create quadratic fee scaling
-        let squared = u64::from(crossed) * u64::from(crossed);
+        let squared = crossed
+            .checked_mul(crossed)
+            .ok_or(ErrorCode::CalculateOverflow)?;
 
         let denominator = U128::from(DYNAMIC_FEE_CONTROL_DENOMINATOR)
             * U128::from(VOLATILITY_ACCUMULATOR_SCALE)
@@ -1164,6 +1179,12 @@ pub fn swap_on_swap_state_with_cache(
     mut _quote_cache: Option<&mut SwapQuoteCache>,
 ) -> Result<(SwapState, u64, u64)> {
     require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
+    // Defend the quote path against malformed pool accounts: every downstream tick-array /
+    // dynamic-fee helper divides or mods by `tick_spacing`.
+    require!(
+        pool_state.tick_spacing != 0,
+        ErrorCode::InvalidTickArrayBoundary
+    );
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
         return err!(ErrorCode::NotApproved);
     }
