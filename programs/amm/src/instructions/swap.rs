@@ -1179,11 +1179,23 @@ pub fn swap_on_swap_state_with_cache(
     mut _quote_cache: Option<&mut SwapQuoteCache>,
 ) -> Result<(SwapState, u64, u64)> {
     require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
-    // Defend the quote path against malformed pool accounts: every downstream tick-array /
-    // dynamic-fee helper divides or mods by `tick_spacing`.
+    // Defend the quote path against malformed pool accounts. Every downstream tick-array /
+    // dynamic-fee helper divides or mods by `tick_spacing`, and the swap math + tick_math
+    // helpers assert valid `sqrt_price` / `tick_current` bounds — surface them as errors
+    // instead of letting account-data poisoning reach a panic.
     require!(
         pool_state.tick_spacing != 0,
         ErrorCode::InvalidTickArrayBoundary
+    );
+    require!(
+        pool_state.sqrt_price_x64 >= tick_math::MIN_SQRT_PRICE_X64
+            && pool_state.sqrt_price_x64 < tick_math::MAX_SQRT_PRICE_X64,
+        ErrorCode::SqrtPriceX64
+    );
+    require!(
+        pool_state.tick_current >= tick_math::MIN_TICK
+            && pool_state.tick_current <= tick_math::MAX_TICK,
+        ErrorCode::InvalidTickIndex
     );
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
         return err!(ErrorCode::NotApproved);

@@ -83,12 +83,21 @@ impl DynamicFeeInfo {
     ///
     /// The accumulator is capped at `max_volatility_accumulator` to prevent excessive fee rates.
     pub fn update_volatility_accumulator(&mut self, tick_spacing_index: i32) -> Result<()> {
-        // Calculate the absolute distance in tick groups from the reference point
-        let index_delta = (self.tick_spacing_index_reference - tick_spacing_index).unsigned_abs();
+        // Calculate the absolute distance in tick groups from the reference point.
+        // Widen to i64 first so adversarial `tick_spacing_index_reference` (loaded straight
+        // from account data) can't overflow the i32 subtraction.
+        let index_delta = (i64::from(self.tick_spacing_index_reference)
+            - i64::from(tick_spacing_index))
+        .unsigned_abs();
         let volatility_accumulator = u64::from(self.volatility_reference)
-            + u64::from(index_delta) * u64::from(VOLATILITY_ACCUMULATOR_SCALE);
+            .checked_add(
+                index_delta.checked_mul(u64::from(VOLATILITY_ACCUMULATOR_SCALE))
+                    .ok_or(ErrorCode::CalculateOverflow)?,
+            )
+            .ok_or(ErrorCode::CalculateOverflow)?;
 
-        // Clamp to maximum value to prevent excessive fee rates
+        // Clamp to maximum value to prevent excessive fee rates. The clamp is bounded by
+        // `max_volatility_accumulator` (u32), so the cast back to u32 is lossless.
         self.volatility_accumulator = std::cmp::min(
             volatility_accumulator,
             u64::from(self.max_volatility_accumulator),
@@ -116,9 +125,13 @@ impl DynamicFeeInfo {
         } else if time_since_reference_update < self.decay_period as u64 {
             // Decay period: update references with decayed volatility
             self.tick_spacing_index_reference = tick_spacing_index;
-            self.volatility_reference =
-                (u64::from(self.volatility_accumulator) * u64::from(self.reduction_factor)
-                    / u64::from(REDUCTION_FACTOR_DENOMINATOR)) as u32;
+            // `reduction_factor` is meant to be a fraction in [0, REDUCTION_FACTOR_DENOMINATOR);
+            // malformed config could exceed that, so clamp the result before casting back to u32.
+            let decayed = u64::from(self.volatility_accumulator)
+                .checked_mul(u64::from(self.reduction_factor))
+                .ok_or(ErrorCode::CalculateOverflow)?
+                / u64::from(REDUCTION_FACTOR_DENOMINATOR);
+            self.volatility_reference = std::cmp::min(decayed, u64::from(u32::MAX)) as u32;
             self.last_update_timestamp = current_timestamp;
         } else {
             // Out of decay time window: reset volatility reference to 0

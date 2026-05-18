@@ -67,7 +67,6 @@ pub fn compute_swap(
             result.amount_in = v;
         }
 
-        // Note: fork's sqrt_price_math returns u128 (not Result), so no `?` on these calls.
         result.sqrt_price_next_x64 =
             if amount_in.is_some() && amount_for_price_calc >= result.amount_in {
                 sqrt_price_target_x64
@@ -77,7 +76,7 @@ pub fn compute_swap(
                     liquidity,
                     amount_for_price_calc,
                     zero_for_one,
-                )
+                )?
             };
     } else {
         // amount_remaining is the net output the user wants to receive (after fee deduction if fee is from output)
@@ -113,7 +112,7 @@ pub fn compute_swap(
                     liquidity,
                     amount_for_price_calc,
                     zero_for_one,
-                )
+                )?
             }
     }
 
