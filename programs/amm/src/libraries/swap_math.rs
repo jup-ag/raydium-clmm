@@ -231,6 +231,25 @@ pub fn compute_swap(
         }
     }
 
+    // Dust stall guard: if `apply_swap_amounts` would not decrement
+    // `amount_specified_remaining`, the caller's swap loop spins forever.
+    // On-chain this drives CU exhaustion — surface as LiquidityInsufficient.
+    let progress = if is_base_input {
+        if is_fee_on_input {
+            result
+                .amount_in
+                .checked_add(result.fee_amount)
+                .ok_or(ErrorCode::CalculateOverflow)?
+        } else {
+            result.amount_in
+        }
+    } else {
+        result.amount_out
+    };
+    if progress == 0 {
+        return Err(ErrorCode::LiquidityInsufficient.into());
+    }
+
     Ok(result)
 }
 
