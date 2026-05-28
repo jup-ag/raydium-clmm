@@ -231,6 +231,28 @@ pub fn compute_swap(
         }
     }
 
+    // Dust stall guard: the caller's swap loop only exits when either
+    // `amount_specified_remaining` drains or `sqrt_price_x64` reaches the
+    // target/limit. If neither moves this step (amount-side decrement is 0
+    // AND price is unchanged), the loop spins until CU exhaustion. Zero-amount
+    // steps with price movement (e.g. traversing an empty-liquidity gap) are
+    // still valid and pass through.
+    let progress = if is_base_input {
+        if is_fee_on_input {
+            result
+                .amount_in
+                .checked_add(result.fee_amount)
+                .ok_or(ErrorCode::CalculateOverflow)?
+        } else {
+            result.amount_in
+        }
+    } else {
+        result.amount_out
+    };
+    if progress == 0 && result.sqrt_price_next_x64 == sqrt_price_current_x64 {
+        return Err(ErrorCode::LiquidityInsufficient.into());
+    }
+
     Ok(result)
 }
 
