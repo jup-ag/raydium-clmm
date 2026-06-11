@@ -423,7 +423,8 @@ impl TickState {
             U128::from(amount_in)
                 .mul_div_floor(token_0_price_x64, U128::from(fixed_point_64::Q64))
                 .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64()
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
         } else {
             let token_0_price_x64 = tick_math::get_price_at_tick(tick, true)?;
             // Convert token1 amount to token0 amount using token1 price (1/token_0_price_x64)
@@ -431,7 +432,8 @@ impl TickState {
             U128::from(amount_in)
                 .mul_div_floor(U128::from(fixed_point_64::Q64), token_0_price_x64)
                 .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64()
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
         };
         Ok(output_amount)
     }
@@ -448,14 +450,16 @@ impl TickState {
             U128::from(amount_out)
                 .mul_div_ceil(token_0_price_x64, U128::from(fixed_point_64::Q64))
                 .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64()
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
         } else {
             let token_0_price_x64 = tick_math::get_price_at_tick(tick, false)?;
             // token0_consumed = token1_executed * 2^64 / token_0_price_x64
             U128::from(amount_out)
                 .mul_div_ceil(U128::from(fixed_point_64::Q64), token_0_price_x64)
                 .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u64()
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
         };
         Ok(amount_in)
     }
@@ -711,6 +715,27 @@ pub mod tick_array_test {
             new_tick_array.ticks[offset] = new_tick;
         }
         RefCell::new(new_tick_array)
+    }
+
+    /// Regression: with a large `amount_in`/`amount_out` and a tick whose price
+    /// scales the result above `u64::MAX`, the limit-order math must return
+    /// `CalculateOverflow` instead of panicking inside the final `u64` narrowing.
+    /// The panic path aborts the whole process under `panic = "abort"`, so a
+    /// single crafted quote could take the server down.
+    #[test]
+    fn limit_order_output_overflow_returns_err_not_panic() {
+        // zero_for_one: output = amount_in * price / 2^64; price > 1 at a
+        // positive tick, so the product exceeds u64::MAX.
+        assert!(TickState::get_limit_order_output(u64::MAX, 10_000, true).is_err());
+        // !zero_for_one: output = amount_in * 2^64 / price; price < 1 at a
+        // negative tick, so the quotient exceeds u64::MAX.
+        assert!(TickState::get_limit_order_output(u64::MAX, -10_000, false).is_err());
+    }
+
+    #[test]
+    fn limit_order_input_overflow_returns_err_not_panic() {
+        assert!(TickState::get_limit_order_input(u64::MAX, 10_000, true).is_err());
+        assert!(TickState::get_limit_order_input(u64::MAX, -10_000, false).is_err());
     }
 
     pub fn build_tick_array_with_tick_states(
