@@ -699,7 +699,10 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
                     is_fee_on_input,
                 )?;
 
-                if limit_order_result.amount_in > 0 {
+                if limit_order_result.amount_in != 0
+                    || limit_order_result.amount_out != 0
+                    || limit_order_result.amm_fee_amount != 0
+                {
                     #[cfg(feature = "enable-log")]
                     msg!(
                         "limit_order_result: amount_in:{}, amount_out:{}, amm_fee_amount:{}",
@@ -1325,7 +1328,10 @@ pub fn swap_on_swap_state_with_cache(
                     is_fee_on_input,
                 )?;
 
-                if limit_order_result.amount_in > 0 {
+                if limit_order_result.amount_in != 0
+                    || limit_order_result.amount_out != 0
+                    || limit_order_result.amm_fee_amount != 0
+                {
                     state.apply_swap_amounts(
                         limit_order_result.amount_in,
                         limit_order_result.amount_out,
