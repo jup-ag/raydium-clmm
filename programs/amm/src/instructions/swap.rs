@@ -401,19 +401,6 @@ impl SwapState {
         Ok(())
     }
 
-    pub fn update_volatility_accumulator_on_price(&mut self) -> Result<()> {
-        if self.dynamic_fee_info.is_some() {
-            let tick_index = tick_math::get_tick_at_sqrt_price(self.sqrt_price_x64)?;
-            let final_tick_spacing_index =
-                tick_spacing_index_from_tick(tick_index, self.tick_spacing)?;
-            if self.tick_spacing_index != final_tick_spacing_index {
-                self.tick_spacing_index = final_tick_spacing_index;
-                self.update_volatility_accumulator()?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_spacing_bounded_price(
         &self,
         target_price: u128,
@@ -699,7 +686,10 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
                     is_fee_on_input,
                 )?;
 
-                if limit_order_result.amount_in > 0 {
+                if limit_order_result.amount_in != 0
+                    || limit_order_result.amount_out != 0
+                    || limit_order_result.amm_fee_amount != 0
+                {
                     #[cfg(feature = "enable-log")]
                     msg!(
                         "limit_order_result: amount_in:{}, amount_out:{}, amm_fee_amount:{}",
@@ -781,6 +771,7 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
                     tick_math::get_tick_at_sqrt_price(swap_computed_result.sqrt_price_next_x64)?;
             }
             state.sqrt_price_x64 = swap_computed_result.sqrt_price_next_x64;
+            state.update_dynamic_fee_index(zero_for_one, is_skipped_tick_spacing)?;
             if state.amount_specified_remaining == 0 || state.sqrt_price_x64 == target_price {
                 let limit_order_unfilled_amount_after =
                     next_initialized_tick.limit_order_unfilled_amount()?;
@@ -793,13 +784,9 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
                 }
                 break;
             }
-            state.update_dynamic_fee_index(zero_for_one, is_skipped_tick_spacing)?;
         }
         state.liquidity = liquidity_next;
     }
-    // At the end of the entire swap loop, `updating_dynamic_fee_index` does not always guarantee that the tick_spacing_index lands in the correct position.
-    // Therefore, we recalculate its position here based on the current price and update the volatility accumulator.
-    state.update_volatility_accumulator_on_price()?;
 
     #[cfg(feature = "enable-log")]
     msg!("end, state:{:#?}", state);
@@ -1325,7 +1312,10 @@ pub fn swap_on_swap_state_with_cache(
                     is_fee_on_input,
                 )?;
 
-                if limit_order_result.amount_in > 0 {
+                if limit_order_result.amount_in != 0
+                    || limit_order_result.amount_out != 0
+                    || limit_order_result.amm_fee_amount != 0
+                {
                     state.apply_swap_amounts(
                         limit_order_result.amount_in,
                         limit_order_result.amount_out,
@@ -1369,6 +1359,7 @@ pub fn swap_on_swap_state_with_cache(
                     tick_math::get_tick_at_sqrt_price(swap_computed_result.sqrt_price_next_x64)?;
             }
             state.sqrt_price_x64 = swap_computed_result.sqrt_price_next_x64;
+            state.update_dynamic_fee_index(zero_for_one, is_skipped_tick_spacing)?;
             if state.amount_specified_remaining == 0 || state.sqrt_price_x64 == target_price {
                 let limit_order_unfilled_amount_after =
                     next_initialized_tick.limit_order_unfilled_amount()?;
@@ -1379,11 +1370,9 @@ pub fn swap_on_swap_state_with_cache(
                 }
                 break;
             }
-            state.update_dynamic_fee_index(zero_for_one, is_skipped_tick_spacing)?;
         }
         state.liquidity = liquidity_next;
     }
-    state.update_volatility_accumulator_on_price()?;
 
     // Quote-path: skip `observation_state.update(...)` and `pool_state.update_after_swap(...)`.
 
