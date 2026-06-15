@@ -401,19 +401,6 @@ impl SwapState {
         Ok(())
     }
 
-    pub fn update_volatility_accumulator_on_price(&mut self) -> Result<()> {
-        if self.dynamic_fee_info.is_some() {
-            let tick_index = tick_math::get_tick_at_sqrt_price(self.sqrt_price_x64)?;
-            let final_tick_spacing_index =
-                tick_spacing_index_from_tick(tick_index, self.tick_spacing)?;
-            if self.tick_spacing_index != final_tick_spacing_index {
-                self.tick_spacing_index = final_tick_spacing_index;
-                self.update_volatility_accumulator()?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_spacing_bounded_price(
         &self,
         target_price: u128,
@@ -800,9 +787,6 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
         }
         state.liquidity = liquidity_next;
     }
-    // At the end of the entire swap loop, `updating_dynamic_fee_index` does not always guarantee that the tick_spacing_index lands in the correct position.
-    // Therefore, we recalculate its position here based on the current price and update the volatility accumulator.
-    state.update_volatility_accumulator_on_price()?;
 
     #[cfg(feature = "enable-log")]
     msg!("end, state:{:#?}", state);
@@ -1389,7 +1373,6 @@ pub fn swap_on_swap_state_with_cache(
         }
         state.liquidity = liquidity_next;
     }
-    state.update_volatility_accumulator_on_price()?;
 
     // Quote-path: skip `observation_state.update(...)` and `pool_state.update_after_swap(...)`.
 
