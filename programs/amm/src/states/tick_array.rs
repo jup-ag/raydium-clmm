@@ -1,6 +1,6 @@
 use crate::error::ErrorCode;
-use crate::libraries::U128;
 use crate::libraries::{fixed_point_64, full_math::MulDiv, liquidity_math, tick_math};
+use crate::libraries::{U128, U256};
 use crate::pool::{RewardInfo, REWARD_NUM};
 use crate::states::config::FEE_RATE_DENOMINATOR_VALUE;
 use crate::util::*;
@@ -416,17 +416,20 @@ impl TickState {
     /// zero_for_one: the direction of the input token
     /// output amount is rounded down
     pub fn get_limit_order_output(amount_in: u64, tick: i32, zero_for_one: bool) -> Result<u64> {
+        let token_0_price_x64 = tick_math::get_price_at_tick(tick, !zero_for_one)?;
+        Self::get_limit_order_output_with_price(amount_in, token_0_price_x64, zero_for_one)
+    }
+
+    fn get_limit_order_output_with_price(
+        amount_in: u64,
+        token_0_price_x64: U128,
+        zero_for_one: bool,
+    ) -> Result<u64> {
         let output_amount = if zero_for_one {
-            let token_0_price_x64 = tick_math::get_price_at_tick(tick, false)?;
             // Convert token0 amount to token1 amount using token0 price
             // token1_amount = token0_amount * token_0_price_x64 / 2^64
-            U128::from(amount_in)
-                .mul_div_floor(token_0_price_x64, U128::from(fixed_point_64::Q64))
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .try_into()
-                .map_err(|_| ErrorCode::CalculateOverflow)?
+            mul_u64_u128_shift_right_64(amount_in, token_0_price_x64, false)?
         } else {
-            let token_0_price_x64 = tick_math::get_price_at_tick(tick, true)?;
             // Convert token1 amount to token0 amount using token1 price (1/token_0_price_x64)
             // token0_amount = token1_amount * 2^64 / token_0_price_x64
             U128::from(amount_in)
@@ -444,16 +447,19 @@ impl TickState {
     /// zero_for_one: the direction of the limit order
     /// input amount is rounded up
     pub fn get_limit_order_input(amount_out: u64, tick: i32, zero_for_one: bool) -> Result<u64> {
+        let token_0_price_x64 = tick_math::get_price_at_tick(tick, zero_for_one)?;
+        Self::get_limit_order_input_with_price(amount_out, token_0_price_x64, zero_for_one)
+    }
+
+    fn get_limit_order_input_with_price(
+        amount_out: u64,
+        token_0_price_x64: U128,
+        zero_for_one: bool,
+    ) -> Result<u64> {
         let amount_in = if zero_for_one {
-            let token_0_price_x64 = tick_math::get_price_at_tick(tick, true)?;
             // token1_consumed = token0_executed * token_0_price_x64 / 2^64
-            U128::from(amount_out)
-                .mul_div_ceil(token_0_price_x64, U128::from(fixed_point_64::Q64))
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .try_into()
-                .map_err(|_| ErrorCode::CalculateOverflow)?
+            mul_u64_u128_shift_right_64(amount_out, token_0_price_x64, true)?
         } else {
-            let token_0_price_x64 = tick_math::get_price_at_tick(tick, false)?;
             // token0_consumed = token1_executed * 2^64 / token_0_price_x64
             U128::from(amount_out)
                 .mul_div_ceil(U128::from(fixed_point_64::Q64), token_0_price_x64)
@@ -480,12 +486,47 @@ impl TickState {
         fee_rate: u32,
         is_fee_on_input: bool,
     ) -> Result<LimitOrderMatchResult> {
+        let token_0_sqrt_price_x64 = tick_math::get_sqrt_price_at_tick(self.tick)?;
+        self.match_limit_order_with_sqrt_price(
+            swap_amount,
+            swap_direction_zero_for_one,
+            is_base_input,
+            fee_rate,
+            is_fee_on_input,
+            token_0_sqrt_price_x64,
+        )
+    }
+
+    /// Match limit orders using the already-computed sqrt price for `self.tick`.
+    ///
+    /// Callers must pass `tick_math::get_sqrt_price_at_tick(self.tick)`; the swap loop already
+    /// has this value as `state.sqrt_price_next_x64` when crossing an initialized tick.
+    pub fn match_limit_order_with_sqrt_price(
+        &mut self,
+        swap_amount: u64,
+        swap_direction_zero_for_one: bool,
+        is_base_input: bool,
+        fee_rate: u32,
+        is_fee_on_input: bool,
+        token_0_sqrt_price_x64: u128,
+    ) -> Result<LimitOrderMatchResult> {
         let mut result = LimitOrderMatchResult::default();
 
         let total_unfilled_amount = self.limit_order_unfilled_amount()?;
         if swap_amount == 0 || total_unfilled_amount == 0 {
             return Ok(result);
         }
+
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            tick_math::get_sqrt_price_at_tick(self.tick).ok(),
+            Some(token_0_sqrt_price_x64)
+        );
+
+        let token_0_price_x64 = tick_math::get_price_from_sqrt_price_x64(
+            token_0_sqrt_price_x64,
+            !swap_direction_zero_for_one,
+        )?;
 
         if is_base_input {
             // Assume the input amount can be fully consumed, calculate the amount of limit order tokens matched
@@ -497,18 +538,18 @@ impl TickState {
             } else {
                 result.amount_in = swap_amount;
             }
-            result.amount_out = TickState::get_limit_order_output(
+            result.amount_out = TickState::get_limit_order_output_with_price(
                 result.amount_in,
-                self.tick,
+                token_0_price_x64,
                 swap_direction_zero_for_one,
             )?;
             // If the amount of limit order tokens matched is greater than the total unfilled amount,
             // it means the input cannot be fully consumed, so recalculate the input and output amounts
             if result.amount_out > total_unfilled_amount {
                 result.amount_out = total_unfilled_amount;
-                result.amount_in = TickState::get_limit_order_input(
+                result.amount_in = TickState::get_limit_order_input_with_price(
                     total_unfilled_amount,
-                    self.tick,
+                    token_0_price_x64,
                     !swap_direction_zero_for_one,
                 )?;
                 if is_fee_on_input {
@@ -537,9 +578,9 @@ impl TickState {
                     .ok_or(ErrorCode::CalculateOverflow)?
                     .min(total_unfilled_amount)
             };
-            result.amount_in = TickState::get_limit_order_input(
+            result.amount_in = TickState::get_limit_order_input_with_price(
                 result.amount_out,
-                self.tick,
+                token_0_price_x64,
                 !swap_direction_zero_for_one,
             )?;
             if is_fee_on_input {
@@ -621,6 +662,20 @@ impl TickState {
     pub fn check_is_out_of_boundary(tick: i32) -> bool {
         tick < tick_math::MIN_TICK || tick > tick_math::MAX_TICK
     }
+}
+
+fn mul_u64_u128_shift_right_64(amount: u64, factor_x64: U128, round_up: bool) -> Result<u64> {
+    let product = U256::from(amount) * U256([factor_x64.0[0], factor_x64.0[1], 0, 0]);
+    let mut quotient = product >> fixed_point_64::RESOLUTION;
+    if round_up && product.0[0] != 0 {
+        quotient = quotient
+            .checked_add(U256::from(1u8))
+            .ok_or(ErrorCode::CalculateOverflow)?;
+    }
+    if quotient.0[1] != 0 || quotient.0[2] != 0 || quotient.0[3] != 0 {
+        return Err(ErrorCode::CalculateOverflow.into());
+    }
+    Ok(quotient.0[0])
 }
 
 // Calculates the fee growths inside of tick_lower and tick_upper based on their positions relative to tick_current.
@@ -736,6 +791,392 @@ pub mod tick_array_test {
     fn limit_order_input_overflow_returns_err_not_panic() {
         assert!(TickState::get_limit_order_input(u64::MAX, 10_000, true).is_err());
         assert!(TickState::get_limit_order_input(u64::MAX, -10_000, false).is_err());
+    }
+
+    #[test]
+    fn shifted_limit_order_math_returns_err_on_ceil_overflow() {
+        assert!(
+            mul_u64_u128_shift_right_64(u64::MAX, U128::from(fixed_point_64::Q64 + 1), true,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn shifted_limit_order_math_rounds_shift_remainder() {
+        assert_eq!(
+            mul_u64_u128_shift_right_64(7, U128::from(fixed_point_64::Q64), false).unwrap(),
+            7
+        );
+        assert_eq!(
+            mul_u64_u128_shift_right_64(7, U128::from(fixed_point_64::Q64), true).unwrap(),
+            7
+        );
+        assert_eq!(
+            mul_u64_u128_shift_right_64(1, U128::from(fixed_point_64::Q64 + 1), false).unwrap(),
+            1
+        );
+        assert_eq!(
+            mul_u64_u128_shift_right_64(1, U128::from(fixed_point_64::Q64 + 1), true).unwrap(),
+            2
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct LimitOrderMatchCase {
+        tick: i32,
+        swap_amount: u64,
+        zero_for_one: bool,
+        is_base_input: bool,
+        fee_rate: u32,
+        is_fee_on_input: bool,
+        orders_amount: u64,
+        part_filled_orders_remaining: u64,
+    }
+
+    #[test]
+    fn match_limit_order_reuses_price_without_changing_results() {
+        let cases = [
+            LimitOrderMatchCase {
+                tick: 0,
+                swap_amount: 0,
+                zero_for_one: true,
+                is_base_input: true,
+                fee_rate: 2_500,
+                is_fee_on_input: true,
+                orders_amount: 1_000,
+                part_filled_orders_remaining: 0,
+            },
+            LimitOrderMatchCase {
+                tick: 0,
+                swap_amount: 1_000,
+                zero_for_one: false,
+                is_base_input: false,
+                fee_rate: 2_500,
+                is_fee_on_input: false,
+                orders_amount: 0,
+                part_filled_orders_remaining: 0,
+            },
+            LimitOrderMatchCase {
+                tick: 0,
+                swap_amount: 1_000,
+                zero_for_one: true,
+                is_base_input: true,
+                fee_rate: 2_500,
+                is_fee_on_input: true,
+                orders_amount: 10_000,
+                part_filled_orders_remaining: 500,
+            },
+            LimitOrderMatchCase {
+                tick: 10_000,
+                swap_amount: 1_000_000,
+                zero_for_one: true,
+                is_base_input: true,
+                fee_rate: 2_500,
+                is_fee_on_input: false,
+                orders_amount: 100,
+                part_filled_orders_remaining: 25,
+            },
+            LimitOrderMatchCase {
+                tick: -10_000,
+                swap_amount: 1_000,
+                zero_for_one: false,
+                is_base_input: false,
+                fee_rate: 2_500,
+                is_fee_on_input: true,
+                orders_amount: 10_000,
+                part_filled_orders_remaining: 500,
+            },
+            LimitOrderMatchCase {
+                tick: 1,
+                swap_amount: 100_000,
+                zero_for_one: false,
+                is_base_input: false,
+                fee_rate: 2_500,
+                is_fee_on_input: false,
+                orders_amount: 250,
+                part_filled_orders_remaining: 25,
+            },
+            LimitOrderMatchCase {
+                tick: tick_math::MIN_TICK + 1,
+                swap_amount: 1,
+                zero_for_one: true,
+                is_base_input: false,
+                fee_rate: 1,
+                is_fee_on_input: true,
+                orders_amount: 1_000_000,
+                part_filled_orders_remaining: 0,
+            },
+            LimitOrderMatchCase {
+                tick: tick_math::MAX_TICK - 1,
+                swap_amount: 1,
+                zero_for_one: false,
+                is_base_input: true,
+                fee_rate: 1,
+                is_fee_on_input: false,
+                orders_amount: 1_000_000,
+                part_filled_orders_remaining: 0,
+            },
+        ];
+
+        for case in cases {
+            let mut old_tick = limit_order_tick(case);
+            let mut new_tick = old_tick;
+
+            let old_result = match_limit_order_reference(
+                &mut old_tick,
+                case.swap_amount,
+                case.zero_for_one,
+                case.is_base_input,
+                case.fee_rate,
+                case.is_fee_on_input,
+            );
+            let sqrt_price_x64 = tick_math::get_sqrt_price_at_tick(case.tick).unwrap();
+            let new_result = new_tick.match_limit_order_with_sqrt_price(
+                case.swap_amount,
+                case.zero_for_one,
+                case.is_base_input,
+                case.fee_rate,
+                case.is_fee_on_input,
+                sqrt_price_x64,
+            );
+
+            match (old_result, new_result) {
+                (Ok(old_result), Ok(new_result)) => {
+                    assert_eq!(
+                        limit_order_result_tuple(old_result),
+                        limit_order_result_tuple(new_result)
+                    );
+                    assert_eq!(
+                        limit_order_state_tuple(&old_tick),
+                        limit_order_state_tuple(&new_tick)
+                    );
+                }
+                (Err(old_error), Err(new_error)) => {
+                    assert_eq!(format!("{old_error:?}"), format!("{new_error:?}"));
+                }
+                (old_result, new_result) => {
+                    panic!(
+                        "mismatched result for tick {}: old={old_result:?} new={new_result:?}",
+                        case.tick
+                    )
+                }
+            }
+        }
+    }
+
+    fn limit_order_tick(case: LimitOrderMatchCase) -> TickState {
+        let mut tick = TickState::default();
+        tick.tick = case.tick;
+        tick.orders_amount = case.orders_amount;
+        tick.part_filled_orders_remaining = case.part_filled_orders_remaining;
+        tick.unfilled_ratio_x64 = u128::from(fixed_point_64::Q64);
+        tick
+    }
+
+    fn limit_order_result_tuple(result: LimitOrderMatchResult) -> (u64, u64, u64) {
+        (result.amount_in, result.amount_out, result.amm_fee_amount)
+    }
+
+    fn limit_order_state_tuple(tick: &TickState) -> (u64, u64, u128, u64) {
+        (
+            tick.orders_amount,
+            tick.part_filled_orders_remaining,
+            tick.unfilled_ratio_x64,
+            tick.order_phase,
+        )
+    }
+
+    fn match_limit_order_reference(
+        tick: &mut TickState,
+        swap_amount: u64,
+        swap_direction_zero_for_one: bool,
+        is_base_input: bool,
+        fee_rate: u32,
+        is_fee_on_input: bool,
+    ) -> Result<LimitOrderMatchResult> {
+        let mut result = LimitOrderMatchResult::default();
+
+        let total_unfilled_amount = tick.limit_order_unfilled_amount()?;
+        if swap_amount == 0 || total_unfilled_amount == 0 {
+            return Ok(result);
+        }
+
+        if is_base_input {
+            if is_fee_on_input {
+                result.amm_fee_amount = swap_amount
+                    .mul_div_ceil((fee_rate).into(), u64::from(FEE_RATE_DENOMINATOR_VALUE))
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+                result.amount_in = swap_amount - result.amm_fee_amount;
+            } else {
+                result.amount_in = swap_amount;
+            }
+            result.amount_out = get_limit_order_output_reference(
+                result.amount_in,
+                tick.tick,
+                swap_direction_zero_for_one,
+            )?;
+            if result.amount_out > total_unfilled_amount {
+                result.amount_out = total_unfilled_amount;
+                result.amount_in = get_limit_order_input_reference(
+                    total_unfilled_amount,
+                    tick.tick,
+                    !swap_direction_zero_for_one,
+                )?;
+                if is_fee_on_input {
+                    result.amm_fee_amount = result
+                        .amount_in
+                        .mul_div_ceil(
+                            (fee_rate).into(),
+                            u64::from(FEE_RATE_DENOMINATOR_VALUE - fee_rate),
+                        )
+                        .ok_or(ErrorCode::CalculateOverflow)?;
+                }
+            }
+        } else {
+            let net_output = swap_amount.min(total_unfilled_amount);
+            result.amount_out = if is_fee_on_input {
+                net_output
+            } else {
+                net_output
+                    .mul_div_ceil(
+                        u64::from(FEE_RATE_DENOMINATOR_VALUE).into(),
+                        (FEE_RATE_DENOMINATOR_VALUE - fee_rate).into(),
+                    )
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .min(total_unfilled_amount)
+            };
+            result.amount_in = get_limit_order_input_reference(
+                result.amount_out,
+                tick.tick,
+                !swap_direction_zero_for_one,
+            )?;
+            if is_fee_on_input {
+                result.amm_fee_amount = result
+                    .amount_in
+                    .mul_div_ceil(
+                        (fee_rate).into(),
+                        u64::from(FEE_RATE_DENOMINATOR_VALUE - fee_rate),
+                    )
+                    .ok_or(ErrorCode::CalculateOverflow)?;
+            }
+        }
+
+        let mut consume_from_part_remaining = 0;
+        if tick.part_filled_orders_remaining > 0 {
+            consume_from_part_remaining = tick.part_filled_orders_remaining.min(result.amount_out);
+            if consume_from_part_remaining > 0 {
+                tick.unfilled_ratio_x64 = U128::from(tick.unfilled_ratio_x64)
+                    .mul_div_floor(
+                        U128::from(tick.part_filled_orders_remaining - consume_from_part_remaining),
+                        U128::from(tick.part_filled_orders_remaining),
+                    )
+                    .ok_or(ErrorCode::CalculateOverflow)?
+                    .as_u128();
+            }
+            tick.part_filled_orders_remaining = tick
+                .part_filled_orders_remaining
+                .saturating_sub(consume_from_part_remaining);
+        }
+        let amount_out_continue_to_consume = result
+            .amount_out
+            .saturating_sub(consume_from_part_remaining);
+
+        if amount_out_continue_to_consume > 0 {
+            require_eq!(tick.part_filled_orders_remaining, 0);
+            require_gte!(
+                tick.orders_amount,
+                amount_out_continue_to_consume,
+                ErrorCode::InvalidLimitOrderAmount
+            );
+            tick.order_phase = tick.order_phase.saturating_add(1);
+
+            tick.unfilled_ratio_x64 = U128::from(fixed_point_64::Q64)
+                .mul_div_floor(
+                    U128::from(tick.orders_amount - amount_out_continue_to_consume),
+                    U128::from(tick.orders_amount),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .as_u128();
+
+            tick.part_filled_orders_remaining = tick.orders_amount - amount_out_continue_to_consume;
+            tick.orders_amount = 0;
+        }
+
+        if !is_fee_on_input {
+            result.amm_fee_amount = result
+                .amount_out
+                .mul_div_ceil((fee_rate).into(), u64::from(FEE_RATE_DENOMINATOR_VALUE))
+                .ok_or(ErrorCode::CalculateOverflow)?;
+            result.amount_out = result
+                .amount_out
+                .checked_sub(result.amm_fee_amount)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+        }
+        Ok(result)
+    }
+
+    fn get_price_at_tick_reference(tick: i32, round_up: bool) -> Result<U128> {
+        let token_0_sqrt_price = tick_math::get_sqrt_price_at_tick(tick)?;
+        let token_0_price = if round_up {
+            U128::from(token_0_sqrt_price)
+                .mul_div_ceil(
+                    U128::from(token_0_sqrt_price),
+                    U128::from(fixed_point_64::Q64),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+        } else {
+            U128::from(token_0_sqrt_price)
+                .mul_div_floor(
+                    U128::from(token_0_sqrt_price),
+                    U128::from(fixed_point_64::Q64),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+        };
+        Ok(token_0_price)
+    }
+
+    fn get_limit_order_output_reference(
+        amount_in: u64,
+        tick: i32,
+        zero_for_one: bool,
+    ) -> Result<u64> {
+        let token_0_price_x64 = get_price_at_tick_reference(tick, !zero_for_one)?;
+        let output_amount = if zero_for_one {
+            U128::from(amount_in)
+                .mul_div_floor(token_0_price_x64, U128::from(fixed_point_64::Q64))
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
+        } else {
+            U128::from(amount_in)
+                .mul_div_floor(U128::from(fixed_point_64::Q64), token_0_price_x64)
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
+        };
+        Ok(output_amount)
+    }
+
+    fn get_limit_order_input_reference(
+        amount_out: u64,
+        tick: i32,
+        zero_for_one: bool,
+    ) -> Result<u64> {
+        let token_0_price_x64 = get_price_at_tick_reference(tick, zero_for_one)?;
+        let amount_in = if zero_for_one {
+            U128::from(amount_out)
+                .mul_div_ceil(token_0_price_x64, U128::from(fixed_point_64::Q64))
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
+        } else {
+            U128::from(amount_out)
+                .mul_div_ceil(U128::from(fixed_point_64::Q64), token_0_price_x64)
+                .ok_or(ErrorCode::CalculateOverflow)?
+                .try_into()
+                .map_err(|_| ErrorCode::CalculateOverflow)?
+        };
+        Ok(amount_in)
     }
 
     pub fn build_tick_array_with_tick_states(

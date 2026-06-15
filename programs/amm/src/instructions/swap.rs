@@ -678,12 +678,13 @@ pub fn swap_internal<'b, 'c: 'info, 'info>(
                 next_initialized_tick.limit_order_unfilled_amount()?;
             if state.sqrt_price_next_x64 == swap_computed_result.sqrt_price_next_x64 {
                 // try to match limit orders on this tick
-                let limit_order_result = next_initialized_tick.match_limit_order(
+                let limit_order_result = next_initialized_tick.match_limit_order_with_sqrt_price(
                     state.amount_specified_remaining,
                     zero_for_one,
                     is_base_input,
                     total_fee_rate,
                     is_fee_on_input,
+                    state.sqrt_price_next_x64,
                 )?;
 
                 if limit_order_result.amount_in != 0
@@ -1304,12 +1305,13 @@ pub fn swap_on_swap_state_with_cache(
             let limit_order_unfilled_amount_before =
                 next_initialized_tick.limit_order_unfilled_amount()?;
             if state.sqrt_price_next_x64 == swap_computed_result.sqrt_price_next_x64 {
-                let limit_order_result = next_initialized_tick.match_limit_order(
+                let limit_order_result = next_initialized_tick.match_limit_order_with_sqrt_price(
                     state.amount_specified_remaining,
                     zero_for_one,
                     is_base_input,
                     total_fee_rate,
                     is_fee_on_input,
+                    state.sqrt_price_next_x64,
                 )?;
 
                 if limit_order_result.amount_in != 0
