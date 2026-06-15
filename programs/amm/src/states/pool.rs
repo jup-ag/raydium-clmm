@@ -433,6 +433,14 @@ impl PoolState {
             if is_found {
                 return Ok(Some(start_index));
             }
+            // When tick_spacing >= 15 the default bitmap already spans the entire
+            // [MIN_TICK, MAX_TICK] range (tick_spacing * 60 * 512 >= MAX_TICK), so a miss means the
+            // direction is exhausted and no extension bitmap exists to search. Return None so the
+            // caller surfaces LiquidityInsufficient, instead of demanding a non-existent extension
+            // account (which would misreport MissingTickArrayBitmapExtensionAccount).
+            if self.tick_spacing >= 15 {
+                return Ok(None);
+            }
             last_tick_array_start_index = start_index;
 
             // Only load extension when needed (after default bitmap search fails)
@@ -513,6 +521,14 @@ impl PoolState {
                 )?;
             if is_found {
                 return Ok(Some(start_index));
+            }
+            // When tick_spacing >= 15 the default bitmap already spans the entire
+            // [MIN_TICK, MAX_TICK] range (tick_spacing * 60 * 512 >= MAX_TICK), so a miss means the
+            // direction is exhausted and no extension bitmap exists to search. Return None so the
+            // caller surfaces LiquidityInsufficient, instead of demanding a non-existent extension
+            // account (which would misreport MissingTickArrayBitmapExtensionAccount).
+            if self.tick_spacing >= 15 {
+                return Ok(None);
             }
             last_tick_array_start_index = start_index;
 
