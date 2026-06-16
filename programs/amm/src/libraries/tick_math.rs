@@ -204,6 +204,17 @@ pub fn get_price_from_sqrt_price_x64(
     token_0_sqrt_price: u128,
     round_up: bool,
 ) -> Result<U128, anchor_lang::error::Error> {
+    if token_0_sqrt_price <= u128::from(u64::MAX) {
+        let square = token_0_sqrt_price * token_0_sqrt_price;
+        let mut token_0_price = square >> fixed_point_64::RESOLUTION;
+        if round_up && (square & (u128::from(fixed_point_64::Q64) - 1)) != 0 {
+            token_0_price = token_0_price
+                .checked_add(1)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+        }
+        return Ok(U128::from(token_0_price));
+    }
+
     let square = U256::from(token_0_sqrt_price) * U256::from(token_0_sqrt_price);
     let mut token_0_price = square >> fixed_point_64::RESOLUTION;
     if round_up && square.0[0] != 0 {

@@ -7,7 +7,7 @@ use crate::util::*;
 use anchor_lang::{prelude::*, solana_program};
 use anchor_spl::token::{Token, TokenAccount};
 use std::cell::RefMut;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 #[cfg(feature = "enable-log")]
 use std::convert::identity;
 use std::ops::Neg;
@@ -226,6 +226,44 @@ impl SwapState {
         Ok(())
     }
 
+    pub fn apply_quote_amounts(
+        &mut self,
+        amount_in: u64,
+        amount_out: u64,
+        fee_amount: u64,
+        is_base_input: bool,
+        is_fee_on_input: bool,
+    ) -> Result<()> {
+        let amount_in_consumed = if is_fee_on_input {
+            amount_in
+                .checked_add(fee_amount)
+                .ok_or(ErrorCode::CalculateOverflow)?
+        } else {
+            amount_in
+        };
+
+        if is_base_input {
+            self.amount_specified_remaining = self
+                .amount_specified_remaining
+                .checked_sub(amount_in_consumed)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+            self.amount_calculated = self
+                .amount_calculated
+                .checked_add(amount_out)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+        } else {
+            self.amount_specified_remaining = self
+                .amount_specified_remaining
+                .checked_sub(amount_out)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+            self.amount_calculated = self
+                .amount_calculated
+                .checked_add(amount_in_consumed)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+        }
+        Ok(())
+    }
+
     pub fn spilt_fees(
         &mut self,
         fee_amont: u64,
@@ -330,6 +368,21 @@ impl SwapState {
         zero_for_one: bool,
         sqrt_price_limit_x64: u128,
     ) -> Result<u128> {
+        self.get_target_price_based_on_next_tick_with_sqrt_price(
+            tick_next,
+            zero_for_one,
+            sqrt_price_limit_x64,
+            None,
+        )
+    }
+
+    fn get_target_price_based_on_next_tick_with_sqrt_price(
+        &mut self,
+        tick_next: i32,
+        zero_for_one: bool,
+        sqrt_price_limit_x64: u128,
+        cached_sqrt_price_next_x64: Option<u128>,
+    ) -> Result<u128> {
         // Clamp tick_next to valid range
         self.tick_next = tick_next;
         if self.tick_next < tick_math::MIN_TICK {
@@ -339,7 +392,10 @@ impl SwapState {
         }
 
         // Calculate sqrt_price for the next tick
-        self.sqrt_price_next_x64 = tick_math::get_sqrt_price_at_tick(self.tick_next)?;
+        self.sqrt_price_next_x64 = match cached_sqrt_price_next_x64 {
+            Some(sqrt_price_next_x64) if self.tick_next == tick_next => sqrt_price_next_x64,
+            _ => tick_math::get_sqrt_price_at_tick(self.tick_next)?,
+        };
 
         // Determine target price: either the next tick price or the limit price
         let target_price = if (zero_for_one && self.sqrt_price_next_x64 < sqrt_price_limit_x64)
@@ -1089,52 +1145,148 @@ pub fn swap_on_swap_state(
     )
 }
 
-#[derive(Default)]
-pub struct SwapQuoteCache {
-    tick_masks: HashMap<(Pubkey, i32), TickArrayMaskCache>,
-}
-
-#[derive(Default, Clone, Copy)]
-struct TickArrayMaskCache {
-    mask: u64,
+#[derive(Clone)]
+pub struct TickArrayQuoteCache {
+    pool_id: Pubkey,
+    start_tick_index: i32,
     recent_epoch: u64,
+    initialized_ticks: Vec<CachedInitializedTick>,
 }
 
-impl SwapQuoteCache {
+#[derive(Clone, Copy)]
+struct CachedInitializedTick {
+    tick_index: i32,
+    tick_offset: usize,
+    quote: CachedTickQuote,
+}
+
+#[derive(Clone, Copy)]
+struct CachedTickQuote {
+    tick: i32,
+    sqrt_price_x64: u128,
+    price_x64_down: U128,
+    price_x64_up: U128,
+    total_unfilled_amount: u64,
+}
+
+impl CachedTickQuote {
     #[inline(always)]
-    fn mask_for(&mut self, tick_array: &TickArrayState) -> u64 {
-        let key = (tick_array.pool_id, tick_array.start_tick_index);
-        let entry = self
-            .tick_masks
-            .entry(key)
-            .or_insert_with(|| TickArrayMaskCache {
-                mask: build_initialized_mask(tick_array),
-                recent_epoch: tick_array.recent_epoch,
-            });
-
-        if entry.recent_epoch != tick_array.recent_epoch {
-            entry.mask = build_initialized_mask(tick_array);
-            entry.recent_epoch = tick_array.recent_epoch;
+    fn price_x64(self, round_up: bool) -> U128 {
+        if round_up {
+            self.price_x64_up
+        } else {
+            self.price_x64_down
         }
-
-        entry.mask
     }
 }
 
-#[inline(always)]
-fn build_initialized_mask(tick_array: &TickArrayState) -> u64 {
-    if tick_array.initialized_tick_count == 0 {
-        return 0;
-    }
-    let mut mask: u64 = 0;
-    let mut i: usize = 0;
-    while i < crate::states::tick_array::TICK_ARRAY_SIZE_USIZE {
-        if tick_array.ticks[i].is_initialized() {
-            mask |= 1u64 << i;
+impl TickArrayQuoteCache {
+    pub fn from_tick_array(tick_array: &TickArrayState) -> Result<Self> {
+        let mut cache = Self {
+            pool_id: tick_array.pool_id,
+            start_tick_index: tick_array.start_tick_index,
+            recent_epoch: tick_array.recent_epoch,
+            initialized_ticks: Vec::with_capacity(tick_array.initialized_tick_count as usize),
+        };
+
+        for (tick_offset, tick) in tick_array.ticks.iter().enumerate() {
+            if !tick.is_initialized() {
+                continue;
+            }
+            let tick_index = tick.tick;
+            let sqrt_price_x64 = tick_math::get_sqrt_price_at_tick(tick.tick)?;
+            cache.initialized_ticks.push(CachedInitializedTick {
+                tick_index,
+                tick_offset,
+                quote: CachedTickQuote {
+                    tick: tick.tick,
+                    sqrt_price_x64,
+                    price_x64_down: tick_math::get_price_from_sqrt_price_x64(
+                        sqrt_price_x64,
+                        false,
+                    )?,
+                    price_x64_up: tick_math::get_price_from_sqrt_price_x64(sqrt_price_x64, true)?,
+                    total_unfilled_amount: tick.limit_order_unfilled_amount()?,
+                },
+            });
         }
-        i += 1;
+        Ok(cache)
     }
-    mask
+
+    #[inline(always)]
+    fn matches_tick_array(&self, tick_array: &TickArrayState) -> bool {
+        let tick_array_pool_id = tick_array.pool_id;
+        let tick_array_start_tick_index = tick_array.start_tick_index;
+        let tick_array_recent_epoch = tick_array.recent_epoch;
+        self.pool_id == tick_array_pool_id
+            && self.start_tick_index == tick_array_start_tick_index
+            && self.recent_epoch == tick_array_recent_epoch
+    }
+
+    #[inline(always)]
+    fn first_initialized_tick(
+        &self,
+        tick_array: &TickArrayState,
+        zero_for_one: bool,
+    ) -> Option<(TickState, CachedTickQuote)> {
+        self.first_initialized_tick_index(zero_for_one)
+            .and_then(|index| self.tick_at(tick_array, index))
+    }
+
+    #[inline(always)]
+    fn first_initialized_tick_index(&self, zero_for_one: bool) -> Option<usize> {
+        if self.initialized_ticks.is_empty() {
+            None
+        } else if zero_for_one {
+            Some(self.initialized_ticks.len() - 1)
+        } else {
+            Some(0)
+        }
+    }
+
+    #[inline(always)]
+    fn next_initialized_tick_index(
+        &self,
+        current_tick_index: i32,
+        zero_for_one: bool,
+    ) -> Option<usize> {
+        let offset = self
+            .initialized_ticks
+            .partition_point(|tick| tick.tick_index <= current_tick_index);
+        if zero_for_one {
+            if offset == 0 {
+                None
+            } else {
+                Some(offset - 1)
+            }
+        } else {
+            (offset < self.initialized_ticks.len()).then_some(offset)
+        }
+    }
+
+    #[inline(always)]
+    fn next_cursor_index(&self, index: usize, zero_for_one: bool) -> Option<usize> {
+        if zero_for_one {
+            index.checked_sub(1)
+        } else {
+            let index = index + 1;
+            (index < self.initialized_ticks.len()).then_some(index)
+        }
+    }
+
+    #[inline(always)]
+    fn tick_at(
+        &self,
+        tick_array: &TickArrayState,
+        index: usize,
+    ) -> Option<(TickState, CachedTickQuote)> {
+        let tick = self.initialized_ticks.get(index)?;
+        let tick_state = unsafe {
+            let ticks = core::ptr::addr_of!(tick_array.ticks) as *const TickState;
+            ticks.add(tick.tick_offset).read_unaligned()
+        };
+        Some((tick_state, tick.quote))
+    }
 }
 
 /// Quote-path mirror of `swap_internal`. Side-by-side comparison invariants:
@@ -1157,6 +1309,58 @@ fn build_initialized_mask(tick_array: &TickArrayState) -> u64 {
 pub fn swap_on_swap_state_with_cache(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
+    tick_array_states: VecDeque<&TickArrayState>,
+    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
+    amount_specified: u64,
+    sqrt_price_limit_x64: u128,
+    zero_for_one: bool,
+    is_base_input: bool,
+    block_timestamp: u64,
+    quote_caches: Option<&[TickArrayQuoteCache]>,
+) -> Result<(SwapState, u64, u64)> {
+    swap_on_swap_state_with_cache_inner::<true>(
+        amm_config,
+        pool_state,
+        tick_array_states,
+        tickarray_bitmap_extension,
+        amount_specified,
+        sqrt_price_limit_x64,
+        zero_for_one,
+        is_base_input,
+        block_timestamp,
+        quote_caches,
+    )
+}
+
+pub fn swap_on_swap_state_quote_with_cache(
+    amm_config: &AmmConfig,
+    pool_state: &PoolState,
+    tick_array_states: VecDeque<&TickArrayState>,
+    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
+    amount_specified: u64,
+    sqrt_price_limit_x64: u128,
+    zero_for_one: bool,
+    is_base_input: bool,
+    block_timestamp: u64,
+    quote_caches: Option<&[TickArrayQuoteCache]>,
+) -> Result<(SwapState, u64, u64)> {
+    swap_on_swap_state_with_cache_inner::<false>(
+        amm_config,
+        pool_state,
+        tick_array_states,
+        tickarray_bitmap_extension,
+        amount_specified,
+        sqrt_price_limit_x64,
+        zero_for_one,
+        is_base_input,
+        block_timestamp,
+        quote_caches,
+    )
+}
+
+fn swap_on_swap_state_with_cache_inner<const POPULATE_FEE_ACCUMULATORS: bool>(
+    amm_config: &AmmConfig,
+    pool_state: &PoolState,
     mut tick_array_states: VecDeque<&TickArrayState>,
     tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
     amount_specified: u64,
@@ -1164,7 +1368,7 @@ pub fn swap_on_swap_state_with_cache(
     zero_for_one: bool,
     is_base_input: bool,
     block_timestamp: u64,
-    mut _quote_cache: Option<&mut SwapQuoteCache>,
+    quote_caches: Option<&[TickArrayQuoteCache]>,
 ) -> Result<(SwapState, u64, u64)> {
     require!(amount_specified != 0, ErrorCode::ZeroAmountSpecified);
     if !pool_state.get_status_by_bit(PoolStatusBitIndex::Swap) {
@@ -1204,6 +1408,11 @@ pub fn swap_on_swap_state_with_cache(
     let mut tick_array_current = tick_array_states
         .pop_front()
         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+    let mut tick_array_cache_index = 0usize;
+    let mut tick_array_quote_cache_current = quote_caches
+        .and_then(|caches| caches.get(tick_array_cache_index))
+        .filter(|cache| cache.matches_tick_array(tick_array_current));
+    let mut tick_array_quote_cursor = None;
     for _ in 0..tick_array_states.len() {
         if tick_array_current.start_tick_index == current_valid_tick_array_start_index {
             break;
@@ -1211,6 +1420,11 @@ pub fn swap_on_swap_state_with_cache(
         tick_array_current = tick_array_states
             .pop_front()
             .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+        tick_array_cache_index += 1;
+        tick_array_quote_cache_current = quote_caches
+            .and_then(|caches| caches.get(tick_array_cache_index))
+            .filter(|cache| cache.matches_tick_array(tick_array_current));
+        tick_array_quote_cursor = None;
     }
     // Quote-path: skip `require_keys_eq!(tick_array_current.pool_id, pool_state.key())`
     require_eq!(
@@ -1227,13 +1441,87 @@ pub fn swap_on_swap_state_with_cache(
         zero_for_one,
         block_timestamp,
     )?;
-
     while state.amount_specified_remaining != 0 && state.sqrt_price_x64 != sqrt_price_limit_x64 {
         #[cfg(feature = "enable-log")]
         msg!("begin, is_base_input:{}, state.liquidity:{}, state.tick:{}, state.sqrt_price_x64:{}, state.tick_spacing_index:{}", is_base_input, state.liquidity, state.tick, state.sqrt_price_x64, state.tick_spacing_index);
 
+        let mut cached_tick_quote = None;
         let mut next_initialized_tick = {
-            if let Some(tick_state) = tick_array_current.next_initialized_tick(
+            if let Some(cache) = tick_array_quote_cache_current {
+                let index = if let Some(index) = tick_array_quote_cursor {
+                    Some(index)
+                } else {
+                    cache.next_initialized_tick_index(state.tick, zero_for_one)
+                };
+                if let Some(index) = index {
+                    if let Some((tick_state, tick_quote)) = cache.tick_at(tick_array_current, index)
+                    {
+                        tick_array_quote_cursor = cache.next_cursor_index(index, zero_for_one);
+                        cached_tick_quote = Some(tick_quote);
+                        tick_state
+                    } else {
+                        return err!(ErrorCode::InvalidTickArray);
+                    }
+                } else if let Some(tick_state) = tick_array_current.next_initialized_tick(
+                    state.tick,
+                    pool_state.tick_spacing,
+                    zero_for_one,
+                )? {
+                    *tick_state
+                } else if !first_tick_array_contains_pool_tick {
+                    first_tick_array_contains_pool_tick = true;
+                    if let Some((tick_state, tick_quote)) =
+                        tick_array_quote_cache_current.and_then(|cache| {
+                            cache.first_initialized_tick(tick_array_current, zero_for_one)
+                        })
+                    {
+                        cached_tick_quote = Some(tick_quote);
+                        tick_state
+                    } else {
+                        *tick_array_current.first_initialized_tick(zero_for_one)?
+                    }
+                } else {
+                    let next_tick_array_index = pool_state
+                        .next_initialized_tick_array_start_index(
+                            tickarray_bitmap_extension,
+                            current_valid_tick_array_start_index,
+                            zero_for_one,
+                        )?
+                        .ok_or(ErrorCode::LiquidityInsufficient)?;
+
+                    while tick_array_current.start_tick_index != next_tick_array_index {
+                        tick_array_current = tick_array_states
+                            .pop_front()
+                            .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+                        tick_array_cache_index += 1;
+                        tick_array_quote_cache_current = quote_caches
+                            .and_then(|caches| caches.get(tick_array_cache_index))
+                            .filter(|cache| cache.matches_tick_array(tick_array_current));
+                        tick_array_quote_cursor = None;
+                        // Quote-path: skip `require_keys_eq!(tick_array_current.pool_id, pool_state.key())`.
+                    }
+                    current_valid_tick_array_start_index = next_tick_array_index;
+
+                    if let Some(cache) = tick_array_quote_cache_current {
+                        if let Some(index) = cache.first_initialized_tick_index(zero_for_one) {
+                            if let Some((tick_state, tick_quote)) =
+                                cache.tick_at(tick_array_current, index)
+                            {
+                                tick_array_quote_cursor =
+                                    cache.next_cursor_index(index, zero_for_one);
+                                cached_tick_quote = Some(tick_quote);
+                                tick_state
+                            } else {
+                                return err!(ErrorCode::InvalidTickArray);
+                            }
+                        } else {
+                            *tick_array_current.first_initialized_tick(zero_for_one)?
+                        }
+                    } else {
+                        *tick_array_current.first_initialized_tick(zero_for_one)?
+                    }
+                }
+            } else if let Some(tick_state) = tick_array_current.next_initialized_tick(
                 state.tick,
                 pool_state.tick_spacing,
                 zero_for_one,
@@ -1241,7 +1529,16 @@ pub fn swap_on_swap_state_with_cache(
                 *tick_state
             } else if !first_tick_array_contains_pool_tick {
                 first_tick_array_contains_pool_tick = true;
-                *tick_array_current.first_initialized_tick(zero_for_one)?
+                if let Some((tick_state, tick_quote)) =
+                    tick_array_quote_cache_current.and_then(|cache| {
+                        cache.first_initialized_tick(tick_array_current, zero_for_one)
+                    })
+                {
+                    cached_tick_quote = Some(tick_quote);
+                    tick_state
+                } else {
+                    *tick_array_current.first_initialized_tick(zero_for_one)?
+                }
             } else {
                 let next_tick_array_index = pool_state
                     .next_initialized_tick_array_start_index(
@@ -1255,19 +1552,34 @@ pub fn swap_on_swap_state_with_cache(
                     tick_array_current = tick_array_states
                         .pop_front()
                         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
+                    tick_array_cache_index += 1;
+                    tick_array_quote_cache_current = quote_caches
+                        .and_then(|caches| caches.get(tick_array_cache_index))
+                        .filter(|cache| cache.matches_tick_array(tick_array_current));
+                    tick_array_quote_cursor = None;
                     // Quote-path: skip `require_keys_eq!(tick_array_current.pool_id, pool_state.key())`.
                 }
                 current_valid_tick_array_start_index = next_tick_array_index;
 
-                *tick_array_current.first_initialized_tick(zero_for_one)?
+                if let Some((tick_state, tick_quote)) =
+                    tick_array_quote_cache_current.and_then(|cache| {
+                        cache.first_initialized_tick(tick_array_current, zero_for_one)
+                    })
+                {
+                    cached_tick_quote = Some(tick_quote);
+                    tick_state
+                } else {
+                    *tick_array_current.first_initialized_tick(zero_for_one)?
+                }
             }
         };
         require_eq!(next_initialized_tick.is_initialized(), true);
 
-        let target_price = state.get_target_price_based_on_next_tick(
+        let target_price = state.get_target_price_based_on_next_tick_with_sqrt_price(
             next_initialized_tick.tick,
             zero_for_one,
             sqrt_price_limit_x64,
+            cached_tick_quote.map(|tick_quote| tick_quote.sqrt_price_x64),
         )?;
 
         let mut liquidity_next = state.liquidity;
@@ -1289,44 +1601,79 @@ pub fn swap_on_swap_state_with_cache(
                     zero_for_one,
                     is_fee_on_input,
                 )?;
-                state.apply_swap_amounts(
-                    swap_computed_result.amount_in,
-                    swap_computed_result.amount_out,
-                    swap_computed_result.fee_amount,
-                    is_base_input,
-                    is_fee_on_input,
-                    amm_config.protocol_fee_rate,
-                    amm_config.fund_fee_rate,
-                )?;
-                swap_computed_result
-            } else {
-                swap_math::SwapComputationResult::new(bounded_price)
-            };
-            let limit_order_unfilled_amount_before =
-                next_initialized_tick.limit_order_unfilled_amount()?;
-            if state.sqrt_price_next_x64 == swap_computed_result.sqrt_price_next_x64 {
-                let limit_order_result = next_initialized_tick.match_limit_order_with_sqrt_price(
-                    state.amount_specified_remaining,
-                    zero_for_one,
-                    is_base_input,
-                    total_fee_rate,
-                    is_fee_on_input,
-                    state.sqrt_price_next_x64,
-                )?;
-
-                if limit_order_result.amount_in != 0
-                    || limit_order_result.amount_out != 0
-                    || limit_order_result.amm_fee_amount != 0
-                {
+                if POPULATE_FEE_ACCUMULATORS {
                     state.apply_swap_amounts(
-                        limit_order_result.amount_in,
-                        limit_order_result.amount_out,
-                        limit_order_result.amm_fee_amount,
+                        swap_computed_result.amount_in,
+                        swap_computed_result.amount_out,
+                        swap_computed_result.fee_amount,
                         is_base_input,
                         is_fee_on_input,
                         amm_config.protocol_fee_rate,
                         amm_config.fund_fee_rate,
                     )?;
+                } else {
+                    state.apply_quote_amounts(
+                        swap_computed_result.amount_in,
+                        swap_computed_result.amount_out,
+                        swap_computed_result.fee_amount,
+                        is_base_input,
+                        is_fee_on_input,
+                    )?;
+                }
+                swap_computed_result
+            } else {
+                swap_math::SwapComputationResult::new(bounded_price)
+            };
+            let limit_order_unfilled_amount_before = if let Some(tick_quote) = cached_tick_quote {
+                tick_quote.total_unfilled_amount
+            } else {
+                next_initialized_tick.limit_order_unfilled_amount()?
+            };
+            if state.sqrt_price_next_x64 == swap_computed_result.sqrt_price_next_x64 {
+                let limit_order_result = if let Some(tick_quote) = cached_tick_quote {
+                    next_initialized_tick.match_limit_order_with_price(
+                        state.amount_specified_remaining,
+                        zero_for_one,
+                        is_base_input,
+                        total_fee_rate,
+                        is_fee_on_input,
+                        tick_quote.price_x64(!zero_for_one),
+                        tick_quote.total_unfilled_amount,
+                    )?
+                } else {
+                    next_initialized_tick.match_limit_order_with_sqrt_price(
+                        state.amount_specified_remaining,
+                        zero_for_one,
+                        is_base_input,
+                        total_fee_rate,
+                        is_fee_on_input,
+                        state.sqrt_price_next_x64,
+                    )?
+                };
+
+                if limit_order_result.amount_in != 0
+                    || limit_order_result.amount_out != 0
+                    || limit_order_result.amm_fee_amount != 0
+                {
+                    if POPULATE_FEE_ACCUMULATORS {
+                        state.apply_swap_amounts(
+                            limit_order_result.amount_in,
+                            limit_order_result.amount_out,
+                            limit_order_result.amm_fee_amount,
+                            is_base_input,
+                            is_fee_on_input,
+                            amm_config.protocol_fee_rate,
+                            amm_config.fund_fee_rate,
+                        )?;
+                    } else {
+                        state.apply_quote_amounts(
+                            limit_order_result.amount_in,
+                            limit_order_result.amount_out,
+                            limit_order_result.amm_fee_amount,
+                            is_base_input,
+                            is_fee_on_input,
+                        )?;
+                    }
                 }
 
                 // Quote-path: skip `tick_array_current.update_initialized_tick_count(false)` and

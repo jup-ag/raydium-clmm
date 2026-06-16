@@ -1,6 +1,6 @@
 use crate::error::ErrorCode;
 use crate::libraries::{fixed_point_64, full_math::MulDiv, liquidity_math, tick_math};
-use crate::libraries::{U128, U256};
+use crate::libraries::U128;
 use crate::pool::{RewardInfo, REWARD_NUM};
 use crate::states::config::FEE_RATE_DENOMINATOR_VALUE;
 use crate::util::*;
@@ -432,11 +432,7 @@ impl TickState {
         } else {
             // Convert token1 amount to token0 amount using token1 price (1/token_0_price_x64)
             // token0_amount = token1_amount * 2^64 / token_0_price_x64
-            U128::from(amount_in)
-                .mul_div_floor(U128::from(fixed_point_64::Q64), token_0_price_x64)
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .try_into()
-                .map_err(|_| ErrorCode::CalculateOverflow)?
+            div_u64_shift_left_64_by_u128(amount_in, token_0_price_x64, false)?
         };
         Ok(output_amount)
     }
@@ -461,11 +457,7 @@ impl TickState {
             mul_u64_u128_shift_right_64(amount_out, token_0_price_x64, true)?
         } else {
             // token0_consumed = token1_executed * 2^64 / token_0_price_x64
-            U128::from(amount_out)
-                .mul_div_ceil(U128::from(fixed_point_64::Q64), token_0_price_x64)
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .try_into()
-                .map_err(|_| ErrorCode::CalculateOverflow)?
+            div_u64_shift_left_64_by_u128(amount_out, token_0_price_x64, true)?
         };
         Ok(amount_in)
     }
@@ -527,6 +519,33 @@ impl TickState {
             token_0_sqrt_price_x64,
             !swap_direction_zero_for_one,
         )?;
+
+        self.match_limit_order_with_price(
+            swap_amount,
+            swap_direction_zero_for_one,
+            is_base_input,
+            fee_rate,
+            is_fee_on_input,
+            token_0_price_x64,
+            total_unfilled_amount,
+        )
+    }
+
+    pub fn match_limit_order_with_price(
+        &mut self,
+        swap_amount: u64,
+        swap_direction_zero_for_one: bool,
+        is_base_input: bool,
+        fee_rate: u32,
+        is_fee_on_input: bool,
+        token_0_price_x64: U128,
+        total_unfilled_amount: u64,
+    ) -> Result<LimitOrderMatchResult> {
+        let mut result = LimitOrderMatchResult::default();
+
+        if swap_amount == 0 || total_unfilled_amount == 0 {
+            return Ok(result);
+        }
 
         if is_base_input {
             // Assume the input amount can be fully consumed, calculate the amount of limit order tokens matched
@@ -601,13 +620,11 @@ impl TickState {
             consume_from_part_remaining = self.part_filled_orders_remaining.min(result.amount_out);
             // Update unfilled_ratio: ratio *= (remaining - consumed) / remaining
             if consume_from_part_remaining > 0 {
-                self.unfilled_ratio_x64 = U128::from(self.unfilled_ratio_x64)
-                    .mul_div_floor(
-                        U128::from(self.part_filled_orders_remaining - consume_from_part_remaining),
-                        U128::from(self.part_filled_orders_remaining),
-                    )
-                    .ok_or(ErrorCode::CalculateOverflow)?
-                    .as_u128();
+                self.unfilled_ratio_x64 = mul_u128_u64_div_u64_floor(
+                    self.unfilled_ratio_x64,
+                    self.part_filled_orders_remaining - consume_from_part_remaining,
+                    self.part_filled_orders_remaining,
+                )?;
             }
             self.part_filled_orders_remaining = self
                 .part_filled_orders_remaining
@@ -629,13 +646,11 @@ impl TickState {
             self.order_phase = self.order_phase.saturating_add(1);
 
             // Reset unfilled_ratio for new phase, then update for consumption
-            self.unfilled_ratio_x64 = U128::from(fixed_point_64::Q64)
-                .mul_div_floor(
-                    U128::from(self.orders_amount - amount_out_continue_to_consume),
-                    U128::from(self.orders_amount),
-                )
-                .ok_or(ErrorCode::CalculateOverflow)?
-                .as_u128();
+            self.unfilled_ratio_x64 = mul_u128_u64_div_u64_floor(
+                u128::from(fixed_point_64::Q64),
+                self.orders_amount - amount_out_continue_to_consume,
+                self.orders_amount,
+            )?;
 
             // Move remaining orders_amount to part_filled_orders_remaining
             self.part_filled_orders_remaining = self.orders_amount - amount_out_continue_to_consume;
@@ -665,17 +680,47 @@ impl TickState {
 }
 
 fn mul_u64_u128_shift_right_64(amount: u64, factor_x64: U128, round_up: bool) -> Result<u64> {
-    let product = U256::from(amount) * U256([factor_x64.0[0], factor_x64.0[1], 0, 0]);
-    let mut quotient = product >> fixed_point_64::RESOLUTION;
-    if round_up && product.0[0] != 0 {
+    let low_product = u128::from(amount) * u128::from(factor_x64.0[0]);
+    let high_product = u128::from(amount) * u128::from(factor_x64.0[1]);
+    let mut quotient = high_product
+        .checked_add(low_product >> fixed_point_64::RESOLUTION)
+        .ok_or(ErrorCode::CalculateOverflow)?;
+    if round_up && (low_product & (u128::from(fixed_point_64::Q64) - 1)) != 0 {
         quotient = quotient
-            .checked_add(U256::from(1u8))
+            .checked_add(1)
             .ok_or(ErrorCode::CalculateOverflow)?;
     }
-    if quotient.0[1] != 0 || quotient.0[2] != 0 || quotient.0[3] != 0 {
+    quotient
+        .try_into()
+        .map_err(|_| ErrorCode::CalculateOverflow.into())
+}
+
+fn div_u64_shift_left_64_by_u128(amount: u64, divisor_x64: U128, round_up: bool) -> Result<u64> {
+    let divisor = divisor_x64.as_u128();
+    if divisor == 0 {
         return Err(ErrorCode::CalculateOverflow.into());
     }
-    Ok(quotient.0[0])
+
+    let numerator = u128::from(amount) << fixed_point_64::RESOLUTION;
+    let mut quotient = numerator / divisor;
+    if round_up && numerator % divisor != 0 {
+        quotient = quotient
+            .checked_add(1)
+            .ok_or(ErrorCode::CalculateOverflow)?;
+    }
+    quotient
+        .try_into()
+        .map_err(|_| ErrorCode::CalculateOverflow.into())
+}
+
+fn mul_u128_u64_div_u64_floor(value: u128, multiplier: u64, divisor: u64) -> Result<u128> {
+    if divisor == 0 {
+        return Err(ErrorCode::CalculateOverflow.into());
+    }
+    value
+        .checked_mul(u128::from(multiplier))
+        .map(|product| product / u128::from(divisor))
+        .ok_or(ErrorCode::CalculateOverflow.into())
 }
 
 // Calculates the fee growths inside of tick_lower and tick_upper based on their positions relative to tick_current.
@@ -819,6 +864,158 @@ pub mod tick_array_test {
             mul_u64_u128_shift_right_64(1, U128::from(fixed_point_64::Q64 + 1), true).unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn native_limit_order_math_matches_generic_mul_div() {
+        let amounts = [
+            0,
+            1,
+            7,
+            1_000,
+            u32::MAX as u64,
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        let factors = [
+            U128::from(1),
+            U128::from(fixed_point_64::Q64 - 1),
+            U128::from(fixed_point_64::Q64),
+            U128::from(fixed_point_64::Q64 + 1),
+            U128([1, 1]),
+            U128([u64::MAX, 1]),
+            U128([0, u64::MAX / 2]),
+        ];
+
+        for amount in amounts {
+            for factor in factors {
+                for round_up in [false, true] {
+                    let expected = if round_up {
+                        U128::from(amount)
+                            .mul_div_ceil(factor, U128::from(fixed_point_64::Q64))
+                    } else {
+                        U128::from(amount)
+                            .mul_div_floor(factor, U128::from(fixed_point_64::Q64))
+                    }
+                    .ok_or(ErrorCode::CalculateOverflow)
+                    .and_then(|value| {
+                        value
+                            .try_into()
+                            .map_err(|_| ErrorCode::CalculateOverflow)
+                    });
+
+                    assert!(
+                        same_u64_result(
+                            mul_u64_u128_shift_right_64(amount, factor, round_up),
+                            expected
+                        ),
+                        "amount={amount} factor={factor:?} round_up={round_up}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_inverse_limit_order_math_matches_generic_mul_div() {
+        let amounts = [
+            0,
+            1,
+            7,
+            1_000,
+            u32::MAX as u64,
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        let divisors = [
+            U128::from(1),
+            U128::from(fixed_point_64::Q64 - 1),
+            U128::from(fixed_point_64::Q64),
+            U128::from(fixed_point_64::Q64 + 1),
+            U128([1, 1]),
+            U128([u64::MAX, 1]),
+            U128([0, u64::MAX / 2]),
+        ];
+
+        for amount in amounts {
+            for divisor in divisors {
+                for round_up in [false, true] {
+                    let expected = if round_up {
+                        U128::from(amount)
+                            .mul_div_ceil(U128::from(fixed_point_64::Q64), divisor)
+                    } else {
+                        U128::from(amount)
+                            .mul_div_floor(U128::from(fixed_point_64::Q64), divisor)
+                    }
+                    .ok_or(ErrorCode::CalculateOverflow)
+                    .and_then(|value| {
+                        value
+                            .try_into()
+                            .map_err(|_| ErrorCode::CalculateOverflow)
+                    });
+
+                    assert!(
+                        same_u64_result(
+                            div_u64_shift_left_64_by_u128(amount, divisor, round_up),
+                            expected
+                        ),
+                        "amount={amount} divisor={divisor:?} round_up={round_up}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_unfilled_ratio_math_matches_generic_mul_div() {
+        let ratios = [
+            0,
+            1,
+            u128::from(fixed_point_64::Q64 / 2),
+            u128::from(fixed_point_64::Q64),
+        ];
+        let multipliers = [0, 1, 7, u32::MAX as u64, u64::MAX];
+        let divisors = [1, 2, 7, u32::MAX as u64, u64::MAX];
+
+        for ratio in ratios {
+            for multiplier in multipliers {
+                for divisor in divisors {
+                    let expected = U128::from(ratio)
+                        .mul_div_floor(U128::from(multiplier), U128::from(divisor))
+                        .ok_or(ErrorCode::CalculateOverflow)
+                        .map(|value| value.as_u128());
+                    assert!(
+                        same_u128_result(
+                            mul_u128_u64_div_u64_floor(ratio, multiplier, divisor),
+                            expected
+                        ),
+                        "ratio={ratio} multiplier={multiplier} divisor={divisor}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn same_u64_result<LeftError, RightError>(
+        left: std::result::Result<u64, LeftError>,
+        right: std::result::Result<u64, RightError>,
+    ) -> bool {
+        match (left, right) {
+            (Ok(left), Ok(right)) => left == right,
+            (Err(_), Err(_)) => true,
+            _ => false,
+        }
+    }
+
+    fn same_u128_result<LeftError, RightError>(
+        left: std::result::Result<u128, LeftError>,
+        right: std::result::Result<u128, RightError>,
+    ) -> bool {
+        match (left, right) {
+            (Ok(left), Ok(right)) => left == right,
+            (Err(_), Err(_)) => true,
+            _ => false,
+        }
     }
 
     #[derive(Clone, Copy)]
