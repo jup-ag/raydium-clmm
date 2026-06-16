@@ -1,6 +1,6 @@
 use crate::error::ErrorCode;
-use crate::libraries::{fixed_point_64, full_math::MulDiv, liquidity_math, tick_math};
 use crate::libraries::U128;
+use crate::libraries::{fixed_point_64, full_math::MulDiv, liquidity_math, tick_math};
 use crate::pool::{RewardInfo, REWARD_NUM};
 use crate::states::config::FEE_RATE_DENOMINATOR_VALUE;
 use crate::util::*;
@@ -868,15 +868,7 @@ pub mod tick_array_test {
 
     #[test]
     fn native_limit_order_math_matches_generic_mul_div() {
-        let amounts = [
-            0,
-            1,
-            7,
-            1_000,
-            u32::MAX as u64,
-            u64::MAX / 2,
-            u64::MAX,
-        ];
+        let amounts = [0, 1, 7, 1_000, u32::MAX as u64, u64::MAX / 2, u64::MAX];
         let factors = [
             U128::from(1),
             U128::from(fixed_point_64::Q64 - 1),
@@ -891,18 +883,12 @@ pub mod tick_array_test {
             for factor in factors {
                 for round_up in [false, true] {
                     let expected = if round_up {
-                        U128::from(amount)
-                            .mul_div_ceil(factor, U128::from(fixed_point_64::Q64))
+                        U128::from(amount).mul_div_ceil(factor, U128::from(fixed_point_64::Q64))
                     } else {
-                        U128::from(amount)
-                            .mul_div_floor(factor, U128::from(fixed_point_64::Q64))
+                        U128::from(amount).mul_div_floor(factor, U128::from(fixed_point_64::Q64))
                     }
                     .ok_or(ErrorCode::CalculateOverflow)
-                    .and_then(|value| {
-                        value
-                            .try_into()
-                            .map_err(|_| ErrorCode::CalculateOverflow)
-                    });
+                    .and_then(|value| value.try_into().map_err(|_| ErrorCode::CalculateOverflow));
 
                     assert!(
                         same_u64_result(
@@ -918,15 +904,7 @@ pub mod tick_array_test {
 
     #[test]
     fn native_inverse_limit_order_math_matches_generic_mul_div() {
-        let amounts = [
-            0,
-            1,
-            7,
-            1_000,
-            u32::MAX as u64,
-            u64::MAX / 2,
-            u64::MAX,
-        ];
+        let amounts = [0, 1, 7, 1_000, u32::MAX as u64, u64::MAX / 2, u64::MAX];
         let divisors = [
             U128::from(1),
             U128::from(fixed_point_64::Q64 - 1),
@@ -941,18 +919,12 @@ pub mod tick_array_test {
             for divisor in divisors {
                 for round_up in [false, true] {
                     let expected = if round_up {
-                        U128::from(amount)
-                            .mul_div_ceil(U128::from(fixed_point_64::Q64), divisor)
+                        U128::from(amount).mul_div_ceil(U128::from(fixed_point_64::Q64), divisor)
                     } else {
-                        U128::from(amount)
-                            .mul_div_floor(U128::from(fixed_point_64::Q64), divisor)
+                        U128::from(amount).mul_div_floor(U128::from(fixed_point_64::Q64), divisor)
                     }
                     .ok_or(ErrorCode::CalculateOverflow)
-                    .and_then(|value| {
-                        value
-                            .try_into()
-                            .map_err(|_| ErrorCode::CalculateOverflow)
-                    });
+                    .and_then(|value| value.try_into().map_err(|_| ErrorCode::CalculateOverflow));
 
                     assert!(
                         same_u64_result(
