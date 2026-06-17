@@ -502,11 +502,9 @@ impl TickState {
         is_fee_on_input: bool,
         token_0_sqrt_price_x64: u128,
     ) -> Result<LimitOrderMatchResult> {
-        let mut result = LimitOrderMatchResult::default();
-
         let total_unfilled_amount = self.limit_order_unfilled_amount()?;
         if swap_amount == 0 || total_unfilled_amount == 0 {
-            return Ok(result);
+            return Ok(LimitOrderMatchResult::default());
         }
 
         #[cfg(debug_assertions)]
