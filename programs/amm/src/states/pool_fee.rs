@@ -91,7 +91,8 @@ impl DynamicFeeInfo {
         .unsigned_abs();
         let volatility_accumulator = u64::from(self.volatility_reference)
             .checked_add(
-                index_delta.checked_mul(u64::from(VOLATILITY_ACCUMULATOR_SCALE))
+                index_delta
+                    .checked_mul(u64::from(VOLATILITY_ACCUMULATOR_SCALE))
                     .ok_or(ErrorCode::CalculateOverflow)?,
             )
             .ok_or(ErrorCode::CalculateOverflow)?;

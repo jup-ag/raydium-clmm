@@ -1,4 +1,4 @@
-use anchor_lang::{prelude::*, system_program};
+use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 
 pub fn create_or_allocate_account<'a>(
@@ -32,7 +32,11 @@ pub fn create_or_allocate_account<'a>(
             let ix = system_instruction::transfer(payer.key, target_account.key, required_lamports);
             invoke_signed(
                 &ix,
-                &[payer.clone(), target_account.clone(), system_program.clone()],
+                &[
+                    payer.clone(),
+                    target_account.clone(),
+                    system_program.clone(),
+                ],
                 &[],
             )?;
         }

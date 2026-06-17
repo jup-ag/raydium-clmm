@@ -1,6 +1,9 @@
 use crate::{
     error::ErrorCode,
-    libraries::{big_num::U128, fixed_point_64, full_math::MulDiv},
+    libraries::{
+        big_num::{U128, U256},
+        fixed_point_64,
+    },
 };
 
 use anchor_lang::require;
@@ -194,27 +197,124 @@ pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32, anchor_lang::
 /// called by the Phase 3 `swap_on_swap_state` rewrite. No callers in the slim SDK yet.
 pub fn get_price_at_tick(tick: i32, round_up: bool) -> Result<U128, anchor_lang::error::Error> {
     let token_0_sqrt_price = get_sqrt_price_at_tick(tick)?;
-    let token_0_price = if round_up {
-        U128::from(token_0_sqrt_price)
-            .mul_div_ceil(
-                U128::from(token_0_sqrt_price),
-                U128::from(fixed_point_64::Q64),
-            )
-            .ok_or(ErrorCode::CalculateOverflow)?
-    } else {
-        U128::from(token_0_sqrt_price)
-            .mul_div_floor(
-                U128::from(token_0_sqrt_price),
-                U128::from(fixed_point_64::Q64),
-            )
-            .ok_or(ErrorCode::CalculateOverflow)?
-    };
-    Ok(token_0_price)
+    get_price_from_sqrt_price_x64(token_0_sqrt_price, round_up)
+}
+
+pub fn get_price_from_sqrt_price_x64(
+    token_0_sqrt_price: u128,
+    round_up: bool,
+) -> Result<U128, anchor_lang::error::Error> {
+    if token_0_sqrt_price <= u128::from(u64::MAX) {
+        let square = token_0_sqrt_price * token_0_sqrt_price;
+        let mut token_0_price = square >> fixed_point_64::RESOLUTION;
+        if round_up && (square & (u128::from(fixed_point_64::Q64) - 1)) != 0 {
+            token_0_price = token_0_price
+                .checked_add(1)
+                .ok_or(ErrorCode::CalculateOverflow)?;
+        }
+        return Ok(U128::from(token_0_price));
+    }
+
+    let square = U256::from(token_0_sqrt_price) * U256::from(token_0_sqrt_price);
+    let mut token_0_price = square >> fixed_point_64::RESOLUTION;
+    if round_up && square.0[0] != 0 {
+        token_0_price = token_0_price
+            .checked_add(U256::from(1u8))
+            .ok_or(ErrorCode::CalculateOverflow)?;
+    }
+    if token_0_price.0[2] != 0 || token_0_price.0[3] != 0 {
+        return Err(ErrorCode::CalculateOverflow.into());
+    }
+    Ok(U128([token_0_price.0[0], token_0_price.0[1]]))
 }
 
 #[cfg(test)]
 mod tick_math_test {
     use super::*;
+    use crate::libraries::full_math::MulDiv;
+
+    fn get_price_at_tick_reference(
+        tick: i32,
+        round_up: bool,
+    ) -> Result<U128, anchor_lang::error::Error> {
+        let token_0_sqrt_price = get_sqrt_price_at_tick(tick)?;
+        let token_0_price = if round_up {
+            U128::from(token_0_sqrt_price)
+                .mul_div_ceil(
+                    U128::from(token_0_sqrt_price),
+                    U128::from(fixed_point_64::Q64),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+        } else {
+            U128::from(token_0_sqrt_price)
+                .mul_div_floor(
+                    U128::from(token_0_sqrt_price),
+                    U128::from(fixed_point_64::Q64),
+                )
+                .ok_or(ErrorCode::CalculateOverflow)?
+        };
+        Ok(token_0_price)
+    }
+
+    #[test]
+    fn get_price_at_tick_shift_matches_generic_mul_div() {
+        let mut ticks = vec![
+            MIN_TICK,
+            MIN_TICK + 1,
+            -100_000,
+            -10_000,
+            -1,
+            0,
+            1,
+            10_000,
+            100_000,
+            MAX_TICK - 1,
+            MAX_TICK,
+        ];
+        ticks.extend((MIN_TICK..=MIN_TICK + 1_000).step_by(37));
+        ticks.extend((-1_000..=1_000).step_by(37));
+        ticks.extend((MAX_TICK - 1_000..=MAX_TICK).step_by(37));
+        ticks.extend((-443_640..=443_640).step_by(60));
+
+        for tick in ticks {
+            let tick = tick.clamp(MIN_TICK, MAX_TICK);
+            for round_up in [false, true] {
+                assert_eq!(
+                    get_price_at_tick(tick, round_up).unwrap(),
+                    get_price_at_tick_reference(tick, round_up).unwrap(),
+                    "tick={tick} round_up={round_up}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn get_price_from_sqrt_price_reports_overflow() {
+        assert!(get_price_from_sqrt_price_x64(u128::MAX, false).is_err());
+        assert!(get_price_from_sqrt_price_x64(u128::MAX, true).is_err());
+    }
+
+    #[test]
+    fn get_price_from_sqrt_price_rounds_shift_remainder() {
+        assert_eq!(
+            get_price_from_sqrt_price_x64(fixed_point_64::Q64, false).unwrap(),
+            U128::from(fixed_point_64::Q64)
+        );
+        assert_eq!(
+            get_price_from_sqrt_price_x64(fixed_point_64::Q64, true).unwrap(),
+            U128::from(fixed_point_64::Q64)
+        );
+
+        assert_eq!(
+            get_price_from_sqrt_price_x64(fixed_point_64::Q64 + 1, false).unwrap(),
+            U128::from(fixed_point_64::Q64 + 2)
+        );
+        assert_eq!(
+            get_price_from_sqrt_price_x64(fixed_point_64::Q64 + 1, true).unwrap(),
+            U128::from(fixed_point_64::Q64 + 3)
+        );
+    }
+
     mod get_sqrt_price_at_tick_test {
         use super::*;
         use crate::libraries::fixed_point_64;

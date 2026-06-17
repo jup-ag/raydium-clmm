@@ -17,6 +17,94 @@ pub struct SwapComputationResult {
     pub fee_amount: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SwapStepAmountCache {
+    pub sqrt_price_current_x64: u128,
+    pub sqrt_price_target_x64: u128,
+    pub liquidity: u128,
+    pub zero_for_one: bool,
+    pub amount_in: Option<u64>,
+    pub amount_out: Option<u64>,
+}
+
+impl SwapStepAmountCache {
+    #[inline(always)]
+    fn matches(
+        self,
+        sqrt_price_current_x64: u128,
+        sqrt_price_target_x64: u128,
+        liquidity: u128,
+        zero_for_one: bool,
+    ) -> bool {
+        self.sqrt_price_current_x64 == sqrt_price_current_x64
+            && self.sqrt_price_target_x64 == sqrt_price_target_x64
+            && self.liquidity == liquidity
+            && self.zero_for_one == zero_for_one
+    }
+
+    #[inline(always)]
+    fn amount_in(
+        self,
+        sqrt_price_current_x64: u128,
+        sqrt_price_target_x64: u128,
+        liquidity: u128,
+        zero_for_one: bool,
+    ) -> Option<Option<u64>> {
+        self.matches(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+        )
+        .then_some(self.amount_in)
+    }
+
+    #[inline(always)]
+    fn amount_out(
+        self,
+        sqrt_price_current_x64: u128,
+        sqrt_price_target_x64: u128,
+        liquidity: u128,
+        zero_for_one: bool,
+    ) -> Option<Option<u64>> {
+        self.matches(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+        )
+        .then_some(self.amount_out)
+    }
+}
+
+pub fn cached_swap_step_amounts(
+    sqrt_price_current_x64: u128,
+    sqrt_price_target_x64: u128,
+    liquidity: u128,
+    zero_for_one: bool,
+) -> Result<SwapStepAmountCache> {
+    Ok(SwapStepAmountCache {
+        sqrt_price_current_x64,
+        sqrt_price_target_x64,
+        liquidity,
+        zero_for_one,
+        amount_in: calculate_amount_in_range(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+            true,
+        )?,
+        amount_out: calculate_amount_in_range(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+            false,
+        )?,
+    })
+}
+
 impl SwapComputationResult {
     pub fn new(sqrt_price_next_x64: u128) -> Self {
         Self {
@@ -42,6 +130,30 @@ pub fn compute_swap(
     zero_for_one: bool,
     is_fee_on_input: bool,
 ) -> Result<SwapComputationResult> {
+    compute_swap_with_cached_amounts(
+        sqrt_price_current_x64,
+        sqrt_price_target_x64,
+        liquidity,
+        amount_remaining,
+        fee_rate,
+        is_base_input,
+        zero_for_one,
+        is_fee_on_input,
+        None,
+    )
+}
+
+pub fn compute_swap_with_cached_amounts(
+    sqrt_price_current_x64: u128,
+    sqrt_price_target_x64: u128,
+    liquidity: u128,
+    amount_remaining: u64,
+    fee_rate: u32,
+    is_base_input: bool,
+    zero_for_one: bool,
+    is_fee_on_input: bool,
+    cached_amounts: Option<SwapStepAmountCache>,
+) -> Result<SwapComputationResult> {
     let mut result = SwapComputationResult::default();
     if is_base_input {
         let amount_for_price_calc = if is_fee_on_input {
@@ -56,13 +168,24 @@ pub fn compute_swap(
             amount_remaining
         };
 
-        let amount_in = calculate_amount_in_range(
-            sqrt_price_current_x64,
-            sqrt_price_target_x64,
-            liquidity,
-            zero_for_one,
-            is_base_input,
-        )?;
+        let amount_in = if let Some(amount_in) = cached_amounts.and_then(|cached| {
+            cached.amount_in(
+                sqrt_price_current_x64,
+                sqrt_price_target_x64,
+                liquidity,
+                zero_for_one,
+            )
+        }) {
+            amount_in
+        } else {
+            calculate_amount_in_range(
+                sqrt_price_current_x64,
+                sqrt_price_target_x64,
+                liquidity,
+                zero_for_one,
+                is_base_input,
+            )?
+        };
         if let Some(v) = amount_in {
             result.amount_in = v;
         }
@@ -93,13 +216,24 @@ pub fn compute_swap(
                 .ok_or(ErrorCode::CalculateOverflow)?
         };
 
-        let amount_out = calculate_amount_in_range(
-            sqrt_price_current_x64,
-            sqrt_price_target_x64,
-            liquidity,
-            zero_for_one,
-            is_base_input,
-        )?;
+        let amount_out = if let Some(amount_out) = cached_amounts.and_then(|cached| {
+            cached.amount_out(
+                sqrt_price_current_x64,
+                sqrt_price_target_x64,
+                liquidity,
+                zero_for_one,
+            )
+        }) {
+            amount_out
+        } else {
+            calculate_amount_in_range(
+                sqrt_price_current_x64,
+                sqrt_price_target_x64,
+                liquidity,
+                zero_for_one,
+                is_base_input,
+            )?
+        };
         if let Some(v) = amount_out {
             result.amount_out = v;
         }
@@ -128,38 +262,130 @@ pub fn compute_swap(
     if zero_for_one {
         // if max is reached for exact input case, entire amount_in is needed
         if !(max && is_base_input) {
-            result.amount_in = liquidity_math::get_delta_amount_0_unsigned(
-                result.sqrt_price_next_x64,
-                sqrt_price_current_x64,
-                liquidity,
-                true,
-            )?
+            result.amount_in = if max {
+                cached_amounts
+                    .and_then(|cached| {
+                        cached
+                            .amount_in(
+                                sqrt_price_current_x64,
+                                sqrt_price_target_x64,
+                                liquidity,
+                                zero_for_one,
+                            )
+                            .flatten()
+                    })
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        liquidity_math::get_delta_amount_0_unsigned(
+                            result.sqrt_price_next_x64,
+                            sqrt_price_current_x64,
+                            liquidity,
+                            true,
+                        )
+                    })?
+            } else {
+                liquidity_math::get_delta_amount_0_unsigned(
+                    result.sqrt_price_next_x64,
+                    sqrt_price_current_x64,
+                    liquidity,
+                    true,
+                )?
+            }
         };
         // if max is reached for exact output case, entire amount_out is needed
         if !(max && !is_base_input) {
-            result.amount_out = liquidity_math::get_delta_amount_1_unsigned(
-                result.sqrt_price_next_x64,
-                sqrt_price_current_x64,
-                liquidity,
-                false,
-            )?;
+            result.amount_out = if max {
+                cached_amounts
+                    .and_then(|cached| {
+                        cached
+                            .amount_out(
+                                sqrt_price_current_x64,
+                                sqrt_price_target_x64,
+                                liquidity,
+                                zero_for_one,
+                            )
+                            .flatten()
+                    })
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        liquidity_math::get_delta_amount_1_unsigned(
+                            result.sqrt_price_next_x64,
+                            sqrt_price_current_x64,
+                            liquidity,
+                            false,
+                        )
+                    })?
+            } else {
+                liquidity_math::get_delta_amount_1_unsigned(
+                    result.sqrt_price_next_x64,
+                    sqrt_price_current_x64,
+                    liquidity,
+                    false,
+                )?
+            };
         };
     } else {
         if !(max && is_base_input) {
-            result.amount_in = liquidity_math::get_delta_amount_1_unsigned(
-                sqrt_price_current_x64,
-                result.sqrt_price_next_x64,
-                liquidity,
-                true,
-            )?
+            result.amount_in = if max {
+                cached_amounts
+                    .and_then(|cached| {
+                        cached
+                            .amount_in(
+                                sqrt_price_current_x64,
+                                sqrt_price_target_x64,
+                                liquidity,
+                                zero_for_one,
+                            )
+                            .flatten()
+                    })
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        liquidity_math::get_delta_amount_1_unsigned(
+                            sqrt_price_current_x64,
+                            result.sqrt_price_next_x64,
+                            liquidity,
+                            true,
+                        )
+                    })?
+            } else {
+                liquidity_math::get_delta_amount_1_unsigned(
+                    sqrt_price_current_x64,
+                    result.sqrt_price_next_x64,
+                    liquidity,
+                    true,
+                )?
+            }
         };
         if !(max && !is_base_input) {
-            result.amount_out = liquidity_math::get_delta_amount_0_unsigned(
-                sqrt_price_current_x64,
-                result.sqrt_price_next_x64,
-                liquidity,
-                false,
-            )?
+            result.amount_out = if max {
+                cached_amounts
+                    .and_then(|cached| {
+                        cached
+                            .amount_out(
+                                sqrt_price_current_x64,
+                                sqrt_price_target_x64,
+                                liquidity,
+                                zero_for_one,
+                            )
+                            .flatten()
+                    })
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        liquidity_math::get_delta_amount_0_unsigned(
+                            sqrt_price_current_x64,
+                            result.sqrt_price_next_x64,
+                            liquidity,
+                            false,
+                        )
+                    })?
+            } else {
+                liquidity_math::get_delta_amount_0_unsigned(
+                    sqrt_price_current_x64,
+                    result.sqrt_price_next_x64,
+                    liquidity,
+                    false,
+                )?
+            }
         };
     }
 
@@ -314,5 +540,94 @@ fn calculate_amount_in_range(
         Ok(v) => Ok(Some(v)),
         Err(e) if e == ErrorCode::MaxTokenOverflow.into() => Ok(None),
         Err(_) => Err(ErrorCode::SqrtPriceLimitOverflow.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::libraries::tick_math;
+
+    fn assert_same_swap(
+        sqrt_price_current_x64: u128,
+        sqrt_price_target_x64: u128,
+        liquidity: u128,
+        amount_remaining: u64,
+        fee_rate: u32,
+        is_base_input: bool,
+        zero_for_one: bool,
+        is_fee_on_input: bool,
+    ) -> Result<()> {
+        let cached_amounts = cached_swap_step_amounts(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            zero_for_one,
+        )?;
+        let uncached = compute_swap(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            amount_remaining,
+            fee_rate,
+            is_base_input,
+            zero_for_one,
+            is_fee_on_input,
+        )?;
+        let cached = compute_swap_with_cached_amounts(
+            sqrt_price_current_x64,
+            sqrt_price_target_x64,
+            liquidity,
+            amount_remaining,
+            fee_rate,
+            is_base_input,
+            zero_for_one,
+            is_fee_on_input,
+            Some(cached_amounts),
+        )?;
+
+        assert_eq!(uncached.sqrt_price_next_x64, cached.sqrt_price_next_x64);
+        assert_eq!(uncached.amount_in, cached.amount_in);
+        assert_eq!(uncached.amount_out, cached.amount_out);
+        assert_eq!(uncached.fee_amount, cached.fee_amount);
+        Ok(())
+    }
+
+    #[test]
+    fn cached_swap_step_amounts_match_uncached_compute_swap() -> Result<()> {
+        let liquidity = 1_000_000_000_000_000u128;
+        let amount_remaining = 1_000_000_000_000_000u64;
+        let fee_rate = 2_500u32;
+
+        for zero_for_one in [true, false] {
+            let (sqrt_price_current_x64, sqrt_price_target_x64) = if zero_for_one {
+                (
+                    tick_math::get_sqrt_price_at_tick(100)?,
+                    tick_math::get_sqrt_price_at_tick(0)?,
+                )
+            } else {
+                (
+                    tick_math::get_sqrt_price_at_tick(0)?,
+                    tick_math::get_sqrt_price_at_tick(100)?,
+                )
+            };
+
+            for is_base_input in [true, false] {
+                for is_fee_on_input in [true, false] {
+                    assert_same_swap(
+                        sqrt_price_current_x64,
+                        sqrt_price_target_x64,
+                        liquidity,
+                        amount_remaining,
+                        fee_rate,
+                        is_base_input,
+                        zero_for_one,
+                        is_fee_on_input,
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }
