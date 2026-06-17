@@ -1116,35 +1116,6 @@ pub fn swap<'info>(
     Ok(())
 }
 
-/// Off-chain quote-path mirror of `swap_internal`. Same swap math, but doesn't mutate
-/// `pool_state`, observation state, or tick array accounts — operates on references and
-/// returns the final `SwapState` plus `(amount_0, amount_1)`. Limit-order fills, dynamic fee,
-/// and `fee_on` are all handled identically to the on-chain version.
-pub fn swap_on_swap_state(
-    amm_config: &AmmConfig,
-    pool_state: &PoolState,
-    tick_array_states: VecDeque<&TickArrayState>,
-    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
-    amount_specified: u64,
-    sqrt_price_limit_x64: u128,
-    zero_for_one: bool,
-    is_base_input: bool,
-    block_timestamp: u64,
-) -> Result<(SwapState, u64, u64)> {
-    swap_on_swap_state_with_cache(
-        amm_config,
-        pool_state,
-        tick_array_states,
-        tickarray_bitmap_extension,
-        amount_specified,
-        sqrt_price_limit_x64,
-        zero_for_one,
-        is_base_input,
-        block_timestamp,
-        None,
-    )
-}
-
 #[derive(Clone)]
 pub struct TickArrayQuoteCache {
     pool_id: Pubkey,
@@ -1415,59 +1386,13 @@ fn read_tick_unaligned(tick_array: &TickArrayState, tick_offset: usize) -> TickS
 ///       * No `tick_array_current.update_initialized_tick_count` / `flip_tick_array_bit` /
 ///         `update_tick_state` — tick array state isn't mutated
 ///       * No `require_keys_eq!` / `require_eq!` checks against pool/account identity
+///       * Quote-only: uses `apply_quote_amounts` (no `spilt_fees`), so protocol/fund/lp fee
+///         accumulators are not populated; `(amount_0, amount_1)` are still faithful
+///
+/// When `quote_caches` matches the live tick arrays, per-tick math (sqrt price, range amounts,
+/// limit-order price/unfilled) is reused from the precomputed cache; any mismatch falls back to
+/// the original on-the-fly math.
 pub fn swap_on_swap_state_with_cache(
-    amm_config: &AmmConfig,
-    pool_state: &PoolState,
-    tick_array_states: VecDeque<&TickArrayState>,
-    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
-    amount_specified: u64,
-    sqrt_price_limit_x64: u128,
-    zero_for_one: bool,
-    is_base_input: bool,
-    block_timestamp: u64,
-    quote_caches: Option<&[TickArrayQuoteCache]>,
-) -> Result<(SwapState, u64, u64)> {
-    swap_on_swap_state_with_cache_inner::<true>(
-        amm_config,
-        pool_state,
-        tick_array_states,
-        tickarray_bitmap_extension,
-        amount_specified,
-        sqrt_price_limit_x64,
-        zero_for_one,
-        is_base_input,
-        block_timestamp,
-        quote_caches,
-    )
-}
-
-pub fn swap_on_swap_state_quote_with_cache(
-    amm_config: &AmmConfig,
-    pool_state: &PoolState,
-    tick_array_states: VecDeque<&TickArrayState>,
-    tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
-    amount_specified: u64,
-    sqrt_price_limit_x64: u128,
-    zero_for_one: bool,
-    is_base_input: bool,
-    block_timestamp: u64,
-    quote_caches: Option<&[TickArrayQuoteCache]>,
-) -> Result<(SwapState, u64, u64)> {
-    swap_on_swap_state_with_cache_inner::<false>(
-        amm_config,
-        pool_state,
-        tick_array_states,
-        tickarray_bitmap_extension,
-        amount_specified,
-        sqrt_price_limit_x64,
-        zero_for_one,
-        is_base_input,
-        block_timestamp,
-        quote_caches,
-    )
-}
-
-fn swap_on_swap_state_with_cache_inner<const POPULATE_FEE_ACCUMULATORS: bool>(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
     mut tick_array_states: VecDeque<&TickArrayState>,
@@ -1696,25 +1621,13 @@ fn swap_on_swap_state_with_cache_inner<const POPULATE_FEE_ACCUMULATORS: bool>(
                     is_fee_on_input,
                     cached_swap_step_amounts,
                 )?;
-                if POPULATE_FEE_ACCUMULATORS {
-                    state.apply_swap_amounts(
-                        swap_computed_result.amount_in,
-                        swap_computed_result.amount_out,
-                        swap_computed_result.fee_amount,
-                        is_base_input,
-                        is_fee_on_input,
-                        amm_config.protocol_fee_rate,
-                        amm_config.fund_fee_rate,
-                    )?;
-                } else {
-                    state.apply_quote_amounts(
-                        swap_computed_result.amount_in,
-                        swap_computed_result.amount_out,
-                        swap_computed_result.fee_amount,
-                        is_base_input,
-                        is_fee_on_input,
-                    )?;
-                }
+                state.apply_quote_amounts(
+                    swap_computed_result.amount_in,
+                    swap_computed_result.amount_out,
+                    swap_computed_result.fee_amount,
+                    is_base_input,
+                    is_fee_on_input,
+                )?;
                 swap_computed_result
             } else {
                 swap_math::SwapComputationResult::new(bounded_price)
@@ -1750,25 +1663,13 @@ fn swap_on_swap_state_with_cache_inner<const POPULATE_FEE_ACCUMULATORS: bool>(
                     || limit_order_result.amount_out != 0
                     || limit_order_result.amm_fee_amount != 0
                 {
-                    if POPULATE_FEE_ACCUMULATORS {
-                        state.apply_swap_amounts(
-                            limit_order_result.amount_in,
-                            limit_order_result.amount_out,
-                            limit_order_result.amm_fee_amount,
-                            is_base_input,
-                            is_fee_on_input,
-                            amm_config.protocol_fee_rate,
-                            amm_config.fund_fee_rate,
-                        )?;
-                    } else {
-                        state.apply_quote_amounts(
-                            limit_order_result.amount_in,
-                            limit_order_result.amount_out,
-                            limit_order_result.amm_fee_amount,
-                            is_base_input,
-                            is_fee_on_input,
-                        )?;
-                    }
+                    state.apply_quote_amounts(
+                        limit_order_result.amount_in,
+                        limit_order_result.amount_out,
+                        limit_order_result.amm_fee_amount,
+                        is_base_input,
+                        is_fee_on_input,
+                    )?;
                 }
 
                 // Quote-path: skip `tick_array_current.update_initialized_tick_count(false)` and
