@@ -1118,9 +1118,7 @@ pub fn swap<'info>(
 
 #[derive(Clone)]
 pub struct TickArrayQuoteCache {
-    pool_id: Pubkey,
     start_tick_index: i32,
-    recent_epoch: u64,
     initialized_ticks: Vec<CachedInitializedTick>,
 }
 
@@ -1153,17 +1151,12 @@ impl CachedTickQuote {
 
 impl TickArrayQuoteCache {
     pub fn from_tick_array(tick_array: &TickArrayState) -> Result<Self> {
-        let pool_id = unsafe { core::ptr::addr_of!((*tick_array).pool_id).read_unaligned() };
         let start_tick_index =
             unsafe { core::ptr::addr_of!((*tick_array).start_tick_index).read_unaligned() };
-        let recent_epoch =
-            unsafe { core::ptr::addr_of!((*tick_array).recent_epoch).read_unaligned() };
         let initialized_tick_count =
             unsafe { core::ptr::addr_of!((*tick_array).initialized_tick_count).read_unaligned() };
         let mut cache = Self {
-            pool_id,
             start_tick_index,
-            recent_epoch,
             initialized_ticks: Vec::with_capacity(initialized_tick_count as usize),
         };
 
@@ -1286,15 +1279,9 @@ impl TickArrayQuoteCache {
 
     #[inline(always)]
     fn matches_tick_array(&self, tick_array: &TickArrayState) -> bool {
-        let tick_array_pool_id =
-            unsafe { core::ptr::addr_of!((*tick_array).pool_id).read_unaligned() };
         let tick_array_start_tick_index =
             unsafe { core::ptr::addr_of!((*tick_array).start_tick_index).read_unaligned() };
-        let tick_array_recent_epoch =
-            unsafe { core::ptr::addr_of!((*tick_array).recent_epoch).read_unaligned() };
-        self.pool_id == tick_array_pool_id
-            && self.start_tick_index == tick_array_start_tick_index
-            && self.recent_epoch == tick_array_recent_epoch
+        self.start_tick_index == tick_array_start_tick_index
     }
 
     #[inline(always)]
