@@ -1185,11 +1185,13 @@ impl TickArrayQuoteCache {
         Ok(cache)
     }
 
-    pub fn from_tick_arrays_for_swap(
+    /// `tick_arrays` are the swap's tick arrays in swap order.
+    pub fn from_tick_arrays_for_swap<'a>(
         pool_state: &PoolState,
-        tick_arrays: VecDeque<&TickArrayState>,
+        tick_arrays: impl IntoIterator<Item = &'a TickArrayState, IntoIter: ExactSizeIterator>,
         zero_for_one: bool,
     ) -> Result<Vec<Self>> {
+        let tick_arrays = tick_arrays.into_iter();
         let mut caches = Vec::with_capacity(tick_arrays.len());
         let mut sqrt_price_current_x64 =
             unsafe { core::ptr::addr_of!((*pool_state).sqrt_price_x64).read_unaligned() };
@@ -1359,7 +1361,8 @@ fn read_tick_unaligned(tick_array: &TickArrayState, tick_offset: usize) -> TickS
 /// Quote-path mirror of `swap_internal`. Side-by-side comparison invariants:
 ///   - Same swap-step math, dynamic-fee accounting, and limit-order fill path
 ///   - Quote-path adjustments (vs on-chain swap_internal):
-///       * Takes `&PoolState` + `VecDeque<&TickArrayState>` instead of `RefMut`s
+///       * Takes `&PoolState` + the tick arrays as `&TickArrayState`s in swap order, in any
+///         exact-size iterator, instead of `RefMut`s
 ///       * Takes `&Option<TickArrayBitmapExtension>` (deserialized) instead of `AccountInfo`,
 ///         using the matching `get_first_initialized_tick_array` /
 ///         `next_initialized_tick_array_start_index` overloads
@@ -1379,10 +1382,10 @@ fn read_tick_unaligned(tick_array: &TickArrayState, tick_offset: usize) -> TickS
 /// When `quote_caches` matches the live tick arrays, per-tick math (sqrt price, range amounts,
 /// limit-order price/unfilled) is reused from the precomputed cache; any mismatch falls back to
 /// the original on-the-fly math.
-pub fn swap_on_swap_state_with_cache(
+pub fn swap_on_swap_state_with_cache<'a>(
     amm_config: &AmmConfig,
     pool_state: &PoolState,
-    mut tick_array_states: VecDeque<&TickArrayState>,
+    tick_array_states: impl IntoIterator<Item = &'a TickArrayState, IntoIter: ExactSizeIterator>,
     tickarray_bitmap_extension: &Option<TickArrayBitmapExtension>,
     amount_specified: u64,
     sqrt_price_limit_x64: u128,
@@ -1426,8 +1429,9 @@ pub fn swap_on_swap_state_with_cache(
         pool_state.get_first_initialized_tick_array(tickarray_bitmap_extension, zero_for_one)?;
     let mut current_valid_tick_array_start_index = first_valid_tick_array_start_index;
 
+    let mut tick_array_states = tick_array_states.into_iter();
     let mut tick_array_current = tick_array_states
-        .pop_front()
+        .next()
         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
     let mut tick_array_cache_index = 0usize;
     let mut tick_array_quote_cache_current = quote_caches
@@ -1439,7 +1443,7 @@ pub fn swap_on_swap_state_with_cache(
             break;
         }
         tick_array_current = tick_array_states
-            .pop_front()
+            .next()
             .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
         tick_array_cache_index += 1;
         tick_array_quote_cache_current = quote_caches
@@ -1503,7 +1507,7 @@ pub fn swap_on_swap_state_with_cache(
 
                     while tick_array_current.start_tick_index != next_tick_array_index {
                         tick_array_current = tick_array_states
-                            .pop_front()
+                            .next()
                             .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
                         tick_array_cache_index += 1;
                         tick_array_quote_cache_current = quote_caches
@@ -1553,7 +1557,7 @@ pub fn swap_on_swap_state_with_cache(
 
                 while tick_array_current.start_tick_index != next_tick_array_index {
                     tick_array_current = tick_array_states
-                        .pop_front()
+                        .next()
                         .ok_or(ErrorCode::NotEnoughTickArrayAccount)?;
                     tick_array_cache_index += 1;
                     tick_array_quote_cache_current = quote_caches
